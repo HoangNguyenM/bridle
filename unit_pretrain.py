@@ -1,13 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
-
-# This source code is licensed under the license found in the
+#
 # LICENSE file in the root directory of this source tree.
+
 # --------------------------------------------------------
 # References:
-# DeiT: https://github.com/facebookresearch/deit
-# BEiT: https://github.com/microsoft/unilm/tree/master/beit
+# AudioMAE: https://github.com/facebookresearch/AudioMAE/blob/main/timm_patch/swin_transformer.py
 # --------------------------------------------------------
+
 import math
 import sys
 from typing import Iterable
@@ -21,9 +21,10 @@ import util.lr_sched as lr_sched
 def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
+                    train_encoder=True,
                     log_writer=None,
                     args=None):
-    model.train(True)
+    
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -45,7 +46,6 @@ def train_one_epoch(model: torch.nn.Module,
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
 
-
         #print(samples.shape)# 64x3x224x224 for img, 64x1x512x128 for audio
         samples = samples.to(device, non_blocking=True)
         
@@ -58,9 +58,10 @@ def train_one_epoch(model: torch.nn.Module,
 
 
         with torch.cuda.amp.autocast():
-            loss_a, _, _, _ = model(samples, mask_ratio=args.mask_ratio)
-        loss_value = loss_a.item()
-        loss_total = loss_a
+            loss = model(samples, mask_ratio=args.mask_ratio)
+
+        loss_value = loss.item()
+        loss_total = loss
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))

@@ -13,13 +13,13 @@ import os
 import uuid
 from pathlib import Path
 
-import main_pretrain as trainer
+import main_finetune_as as trainer
 import submitit
 
 
 def parse_args():
     trainer_parser = trainer.get_args_parser()
-    parser = argparse.ArgumentParser("Submitit for BEATs pretrain", parents=[trainer_parser])
+    parser = argparse.ArgumentParser("Submitit for BEATs finetune", parents=[trainer_parser])
     parser.add_argument("--ngpus", default=8, type=int, help="Number of gpus to request on each node")
     parser.add_argument("--nodes", default=2, type=int, help="Number of nodes to request")
     parser.add_argument("--timeout", default=10080, type=int, help="Duration of the job") # in minutes
@@ -52,7 +52,7 @@ class Trainer(object):
         self.args = args
 
     def __call__(self):
-        import main_pretrain as trainer
+        import main_finetune_as as trainer
 
         self._setup_gpu_args()
         trainer.main(self.args)

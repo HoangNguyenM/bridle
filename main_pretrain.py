@@ -1,13 +1,13 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
-
-# This source code is licensed under the license found in the
+#
 # LICENSE file in the root directory of this source tree.
+
 # --------------------------------------------------------
 # References:
-# DeiT: https://github.com/facebookresearch/deit
-# BEiT: https://github.com/microsoft/unilm/tree/master/beit
+# AudioMAE: https://github.com/facebookresearch/AudioMAE
 # --------------------------------------------------------
+
 import argparse
 import datetime
 import json
@@ -22,18 +22,16 @@ from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 
-import timm
-
-assert timm.__version__ == "0.3.2"  # version check
 import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
-from util.pos_embed import interpolate_pos_embed, interpolate_pos_embed_audio, interpolate_patch_embed_audio
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-from beats import BEATs, BEATsConfig
+from model.beats import BEATs
+import model.encoder_decoder as BEATs_encoder_decoder
+import model.tokenizer as BEATs_tokenizer
 
-from engine_pretrain import train_one_epoch
+from unit_pretrain import train_one_epoch
 from dataset import AudiosetDataset
 
 def get_args_parser():
@@ -44,6 +42,43 @@ def get_args_parser():
     parser.add_argument('--accum_iter', default=1, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
     
+    # Model parameters
+    parser.add_argument('--model', default='vit_b', type=str, metavar='MODEL',
+                        help='Name of model to train')
+
+    parser.add_argument('--input_size', default=224, type=int,
+                        help='images input size')
+
+    parser.add_argument('--mask_ratio', default=0.8, type=float, 
+                        help='Masking ratio (percentage of removed patches).')
+
+    parser.add_argument('--mode', default=0, type=int,help='contrastive mode')
+    parser.add_argument('--save_every_epoch', default=20, type=int,help='save_every_epoch')
+    parser.add_argument('--use_custom_patch', type=bool, default=False, help='use custom patch and override timm PatchEmbed')
+    
+    parser.add_argument('--roll_mag_aug', type=bool, default=False, help='use roll_mag_aug')	
+    parser.add_argument('--split_pos', type=bool, default=False, help='use splitted pos emb')	
+    parser.add_argument('--pos_trainable', type=bool, default=False, help='use trainable pos emb')	
+    parser.add_argument('--load_video', type=bool, default=False, help='load video')
+
+    parser.add_argument('--decoder_mode', default=1, type=int,help='decoder mode 0: global attn 1: swined local attn')
+    parser.add_argument('--estimator_mode', default=2, type=int,help='decoder mode 0: global attn 1: swined local attn')
+
+    parser.add_argument('--mask_t_prob', default=0.7, type=float, help='ratio of masking time')
+    parser.add_argument('--mask_f_prob', default=0.3, type=float, help='ratio of masking freq')
+    parser.add_argument('--mask_2d', type=bool, default=False, help='use 2d masking')
+    parser.add_argument('--init_audio_with_video_mae', type=bool, default=False, help='init_audio_with_video_mae')
+    parser.set_defaults(audio_exp=True)
+    parser.add_argument('--no_shift', type=bool, default=False, help='no_shift')
+    
+    # Codebook parameters
+    parser.add_argument('--codebook_type', default="legacy", type=str, help='Type of codebook: legacy or rq')
+    parser.add_argument('--code_num', default=1024, type=int, help='Number of codes in a codebook')
+    parser.add_argument('--code_dim', default=256, type=int, help='Dimension of each code')
+    parser.add_argument('--codebook_set', default=1, type=int, help='Number of codebooks')
+    parser.add_argument('--ema', default=True, type=bool, help='EMA update for tokenizer codebook training')
+    parser.add_argument('--commitment_loss_weight', default=0.25, type=float, help='weight of commitment loss term during tokenizer training')
+    parser.add_argument('--cold_start', default=False, type=bool, help='Use cold start tokenizer or full tokenizer')
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -63,9 +98,11 @@ def get_args_parser():
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
 
-    parser.add_argument('--output_dir', default='./output_dir',
+    # Training parameters
+    parser.add_argument('--train_encoder', type=bool, default=True, help='True: train encoder decoder, False: train tokenizer')
+    parser.add_argument('--output_dir', default='/checkpoints/hoangmn/pretrain',
                         help='path where to save, empty for no saving')
-    parser.add_argument('--log_dir', default='./output_dir',
+    parser.add_argument('--log_dir', default='/checkpoints/hoangmn/pretrain',
                         help='path where to tensorboard log')
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
@@ -88,48 +125,20 @@ def get_args_parser():
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
-
+    parser.add_argument("--distributed", type=bool, default=True)
 
     # For audioset
     parser.add_argument('--audio_exp', type=bool, default=True, help='audio exp')
-    #parser.add_argument("--data_train", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/train.json', help="training data json")
-    #parser.add_argument("--data_eval", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/eval.json', help="validation data json")
-    parser.add_argument("--data_train", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/train_video.json', help="training data json")
-    parser.add_argument("--data_eval", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/datafiles/eval_video.json', help="validation data json")    
-    parser.add_argument("--label_csv", type=str, default='/checkpoint/berniehuang/ast/egs/audioset/data/class_labels_indices.csv', help="csv with class labels")
+    parser.add_argument("--data_train", type=str, default='/fsx/hoangmn/audioset_resample/bal_train.json', help="training data json")
+    parser.add_argument("--data_eval", type=str, default='/fsx/hoangmn/audioset_resample/eval.json', help="validation data json")    
+    parser.add_argument("--label_csv", type=str, default='/fsx/hoangmn/audioset/class_labels_indices.csv', help="csv with class labels")
     parser.add_argument('--freqm', help='frequency mask max length', type=int, default=0) # pretraining 0
     parser.add_argument('--timem', help='time mask max length', type=int, default=0) # pretraining 0
     parser.add_argument("--mixup", type=float, default=0, help="how many (0-1) samples need to be mixup during training")
     parser.add_argument("--dataset", type=str, default="audioset", help="dataset", choices=["audioset", "esc50", "speechcommands"])
     parser.add_argument("--use_fbank", type=bool, default=False)
     parser.add_argument("--fbank_dir", type=str, default="/checkpoint/berniehuang/ast/egs/esc50/data/ESC-50-master/fbank", help="fbank dir")
-    parser.add_argument("--alpha", type=float, default=0.0, help="contrastive loss weight")
-    parser.add_argument("--omega", type=float, default=1.0, help="reconstruction loss weight")    
-    parser.add_argument('--mode', default=0, type=int,help='contrastive mode')
-    parser.add_argument('--save_every_epoch', default=20, type=int,help='save_every_epoch')
-    parser.add_argument('--use_custom_patch', type=bool, default=False, help='use custom patch and override timm PatchEmbed')
-    #parser.add_argument("--distributed", type=bool, default=True)
-    parser.add_argument('--roll_mag_aug', type=bool, default=False, help='use roll_mag_aug')	
-    parser.add_argument('--split_pos', type=bool, default=False, help='use splitted pos emb')	
-    parser.add_argument('--pos_trainable', type=bool, default=False, help='use trainable pos emb')	
-    parser.add_argument('--use_nce', type=bool, default=False, help='use use_nce')
-    parser.add_argument('--load_video', type=bool, default=False, help='load video')
-    parser.add_argument('--decoder_mode', default=1, type=int,help='decoder mode 0: global attn 1: swined local attn')
-    # remove for A-MAE
-    #parser.add_argument('--v_weight', default=1.0, type=float, help='reconstruction weight for the visual part')
-    #parser.add_argument('--video_only', type=bool, default=False, help='video_only pre-training')
-    #parser.add_argument('--cl', type=bool, default=False, help='use pre-text curriculum')
-    #parser.add_argument('--n_frm', default=4, type=int,help='how many frames to encode, at least 2 as temporal kernel stride is 2')
-    #parser.add_argument('--depth_av', default=3, type=int,help='depth of multimodal fusion encoder')
-    parser.add_argument('--mask_t_prob', default=0.7, type=float, help='ratio of masking time')
-    parser.add_argument('--mask_f_prob', default=0.3, type=float, help='ratio of masking freq')
-    parser.add_argument('--mask_2d', type=bool, default=False, help='use 2d masking')
-    parser.add_argument('--init_audio_with_video_mae', type=bool, default=False, help='init_audio_with_video_mae')
-    parser.set_defaults(audio_exp=True)
-    parser.add_argument('--no_shift', type=bool, default=False, help='no_shift')
 
-    # set norm_pix_loss=True for normal training, norm_pix_loss=False for visualization
-    parser.set_defaults(norm_pix_loss=True)
     return parser
 
 
@@ -175,7 +184,7 @@ def main(args):
                                         load_video=args.load_video)
     #print(dataset_train)
 
-    if True:  # args.distributed:
+    if args.distributed:
         num_tasks = misc.get_world_size()
         global_rank = misc.get_rank()
         sampler_train = torch.utils.data.DistributedSampler(
@@ -200,9 +209,29 @@ def main(args):
     )
     
     # define the model
-    cfg = BEATsConfig()
-    model = BEATs(cfg)
+    if args.audio_exp:
+        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model](in_chans=1, audio_exp=True,	
+                                            img_size=(target_length[args.dataset],128),	
+                                            mode=args.mode, use_custom_patch=args.use_custom_patch,	
+                                            pos_trainable=args.pos_trainable, decoder_mode=args.decoder_mode, 
+                                            mask_2d=args.mask_2d, mask_t_prob=args.mask_t_prob, mask_f_prob=args.mask_f_prob, 
+                                            code_num=args.code_num, codebook_set=args.codebook_set, 
+                                            no_shift=args.no_shift,
+                                            )
+        tokenizer = BEATs_tokenizer.__dict__[args.model](in_chans=1, audio_exp=True,	
+                                            img_size=(target_length[args.dataset],128),	
+                                            mode=args.mode, use_custom_patch=args.use_custom_patch,	
+                                            pos_trainable=args.pos_trainable, estimator_mode=args.estimator_mode, 
+                                            code_num=args.code_num, code_dim=args.code_dim, codebook_set=args.codebook_set, 
+                                            commitment_loss_weight=args.commitment_loss_weight, ema=args.ema, 
+                                            no_shift=args.no_shift,
+                                            )
+    else:
+        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model]()
+        tokenizer = BEATs_tokenizer.__dict__[args.model]()
 
+    model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
+                  cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)
     model.to(device)
 
     model_without_ddp = model
@@ -225,7 +254,7 @@ def main(args):
         model_without_ddp = model.module
     
     # following timm: set wd as 0 for bias and norm layers
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
+    param_groups = optim_factory.param_groups_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
     loss_scaler = NativeScaler()
@@ -240,6 +269,7 @@ def main(args):
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
+            train_encoder=args.train_encoder,
             log_writer=log_writer,
             args=args
         )
