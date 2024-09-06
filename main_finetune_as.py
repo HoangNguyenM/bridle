@@ -43,6 +43,7 @@ from torch.utils.data import WeightedRandomSampler
 
 def get_args_parser():
     parser = argparse.ArgumentParser('BEATs fine-tuning for image classification', add_help=False)
+    parser.add_argument('--linear_probe', default=False, type=bool)
     parser.add_argument('--batch_size', default=4, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=60, type=int)
@@ -65,10 +66,9 @@ def get_args_parser():
     parser.add_argument('--weight_decay', type=float, default=0.0005,
                         help='weight decay (default: 0.05)')
 
-    parser.add_argument('--lr', type=float, default=None, metavar='LR',
+    parser.add_argument('--lr', type=float, default=1e-3, metavar='LR',
                         help='learning rate (absolute lr)')
-    parser.add_argument('--blr', type=float, default=2e-3, metavar='LR',
-                        help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
+
     parser.add_argument('--layer_decay', type=float, default=0.75,
                         help='layer-wise lr decay from ELECTRA/BEiT')
 
@@ -111,8 +111,7 @@ def get_args_parser():
                         help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 
     # * Finetuning params
-    parser.add_argument('--finetune', default='',
-                        help='finetune from checkpoint')
+    parser.add_argument('--finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--global_pool', action='store_true')
     parser.set_defaults(global_pool=True)
     parser.add_argument('--cls_token', action='store_false', dest='global_pool',
@@ -131,8 +130,7 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
-    parser.add_argument('--resume', default='',
-                        help='resume from checkpoint')
+    parser.add_argument('--resume', default='', help='resume from checkpoint')
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
@@ -150,17 +148,17 @@ def get_args_parser():
     parser.add_argument("--distributed", type=bool, default=True)
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
-    parser.add_argument('--local_rank', default=-1, type=int)
+    parser.add_argument('--local-rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
     parser.add_argument('--dist_url', default='env://',
                         help='url used to set up distributed training')
 
     # For audioset
     parser.add_argument('--audio_exp', action='store_true', help='audio exp')
-    parser.add_argument("--data_train", type=str, default='/fsx/hoangmn/audioset_resample/bal_train.json', help="training data json")
-    parser.add_argument("--data_eval", type=str, default='/fsx/hoangmn/audioset_resample/eval.json', help="validation data json")    
+    parser.add_argument("--data_train", type=str, default='/fsx/hoangmn/audioset/train_all.json', help="training data json")
+    parser.add_argument("--data_eval", type=str, default='/fsx/hoangmn/audioset/eval.json', help="validation data json")    
     parser.add_argument("--label_csv", type=str, default='/fsx/hoangmn/audioset/class_labels_indices.csv', help="csv with class labels")
-    parser.add_argument("--weight_csv", type=str, default='/checkpoint/berniehuang/mae/data/audioset/weight_train_all.csv', help="weight file")
+    parser.add_argument("--weight_csv", type=str, default='/fsx/hoangmn/audioset/weight_train_all.csv', help="weight file")
     
     parser.add_argument('--freqm', help='frequency mask max length', type=int, default=192)
     parser.add_argument('--timem', help='time mask max length', type=int, default=48)
@@ -168,7 +166,7 @@ def get_args_parser():
     parser.add_argument("--dataset", type=str, default="audioset", help="the dataset used", choices=["audioset", "esc50", "speechcommands", "k400"])
     parser.add_argument("--use_fbank", type=bool, default=False)
     parser.add_argument("--use_soft", type=bool, default=False)
-    parser.add_argument("--fbank_dir", type=str, default="/checkpoint/berniehuang/ast/egs/esc50/data/ESC-50-master/fbank", help="fbank dir") 
+    parser.add_argument("--fbank_dir", type=str, default="/fsx/hoangmn/esc_50/ESC-50-master/fbank", help="fbank dir") 
     parser.set_defaults(audio_exp=True)
 
     parser.add_argument('--first_eval_ep', default=0, type=int, help='do eval after first_eval_ep')
@@ -245,8 +243,13 @@ def main(args):
         dataset_train = build_dataset(is_train=True, args=args)
         dataset_val = build_dataset(is_train=False, args=args)
     else:
+        # stats from audio mae
         norm_stats = {'audioset':[-4.2677393, 4.5689974], 'k400':[-4.2677393, 4.5689974], 
                       'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
+        # new analytical stats
+        # norm_stats = {'audioset':[-4.4446096, 3.3216383], 'k400':[-4.2677393, 4.5689974], 
+        #               'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
+        
         target_length = {'audioset':1024, 'k400':1024, 'esc50':512, 'speechcommands':128}
         multilabel_dataset = {'audioset': True, 'esc50': False, 'k400': False, 'speechcommands': True}
         audio_conf_train = {'num_mel_bins': 128, 
@@ -379,12 +382,14 @@ def main(args):
             #num_patches = 512 # assume audioset, 1024//16=64, 128//16=8, 512=64x8
             model.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, emb_dim), requires_grad=False)  # fixed sin-cos embedding
 
-    #if args.finetune and not args.eval:
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location='cpu')
         print("Load pre-trained checkpoint from: %s" % args.finetune)
         checkpoint_model = checkpoint['model']
         state_dict = model.state_dict()
+
+        # modify checkpoint keys from pretrained checkpoint
+        checkpoint_model = {k.replace("encoder_decoder.", "", 1): v for k, v in checkpoint_model.items() if "encoder_decoder" in k}
 
         if not args.eval:
             for k in ['head.weight', 'head.bias']:
@@ -395,9 +400,18 @@ def main(args):
         msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
 
+        for name, p in model.named_parameters():
+            print(f"{name}: requires_grad = {p.requires_grad}")
+
         # manually initialize fc layer
         if not args.eval:
             trunc_normal_(model.head.weight, std=2e-5)
+
+    # freeze all layers except head & pooling if linear probe
+    if args.linear_probe:
+        for p in model.parameters():
+            if p not in ['head.weight', 'head.bias', 'fc_norm.weight', 'fc_norm.bias']:
+                p.requires_grad = False
 
     model.to(device)
 
@@ -409,10 +423,6 @@ def main(args):
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     
-    if args.lr is None:  # only base_lr is specified
-        args.lr = args.blr * eff_batch_size / 256
-
-    print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
     print("actual lr: %.2e" % args.lr)
 
     print("accumulate grad iterations: %d" % args.accum_iter)

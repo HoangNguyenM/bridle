@@ -79,15 +79,17 @@ def get_args_parser():
     parser.add_argument('--ema', default=True, type=bool, help='EMA update for tokenizer codebook training')
     parser.add_argument('--commitment_loss_weight', default=0.25, type=float, help='weight of commitment loss term during tokenizer training')
     parser.add_argument('--cold_start', default=False, type=bool, help='Use cold start tokenizer or full tokenizer')
+    # RQ codebook specifics
+    parser.add_argument('--restart_unused_codes', default=True, type=bool, help='restart unused codes in the first iteration')
+    parser.add_argument('--init_weight_multiplier', default=0.33, type=float, help='initial std of codebook weights')
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
                         help='weight decay (default: 0.05)')
 
-    parser.add_argument('--lr', type=float, default=None, metavar='LR',
+    parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
                         help='learning rate (absolute lr)')
-    parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
-                        help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
+
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
                         help='lower lr bound for cyclic schedulers that hit 0')
 
@@ -107,8 +109,7 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
-    parser.add_argument('--resume', default='',
-                        help='resume from checkpoint')
+    parser.add_argument('--resume', default='', help='resume from checkpoint')
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
@@ -129,15 +130,15 @@ def get_args_parser():
 
     # For audioset
     parser.add_argument('--audio_exp', type=bool, default=True, help='audio exp')
-    parser.add_argument("--data_train", type=str, default='/fsx/hoangmn/audioset_resample/bal_train.json', help="training data json")
-    parser.add_argument("--data_eval", type=str, default='/fsx/hoangmn/audioset_resample/eval.json', help="validation data json")    
+    parser.add_argument("--data_train", type=str, default='/fsx/hoangmn/audioset/train_all.json', help="training data json")
+    parser.add_argument("--data_eval", type=str, default='/fsx/hoangmn/audioset/eval.json', help="validation data json")    
     parser.add_argument("--label_csv", type=str, default='/fsx/hoangmn/audioset/class_labels_indices.csv', help="csv with class labels")
     parser.add_argument('--freqm', help='frequency mask max length', type=int, default=0) # pretraining 0
     parser.add_argument('--timem', help='time mask max length', type=int, default=0) # pretraining 0
     parser.add_argument("--mixup", type=float, default=0, help="how many (0-1) samples need to be mixup during training")
     parser.add_argument("--dataset", type=str, default="audioset", help="dataset", choices=["audioset", "esc50", "speechcommands"])
     parser.add_argument("--use_fbank", type=bool, default=False)
-    parser.add_argument("--fbank_dir", type=str, default="/checkpoint/berniehuang/ast/egs/esc50/data/ESC-50-master/fbank", help="fbank dir")
+    parser.add_argument("--fbank_dir", type=str, default="/fsx/hoangmn/esc_50/ESC-50-master/fbank", help="fbank dir")
 
     return parser
 
@@ -166,7 +167,11 @@ def main(args):
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
         dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
     else:
-        norm_stats = {'audioset':[-4.2677393, 4.5689974], 'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
+        # stats from audio mae
+        # norm_stats = {'audioset':[-4.2677393, 4.5689974], 'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
+        # new analytical stats
+        norm_stats = {'audioset':[-4.4446096, 3.3216383], 'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
+
         target_length = {'audioset':1024, 'esc50':512, 'speechcommands':128}
         multilabel_dataset = {'audioset': True, 'esc50': False, 'k400': False, 'speechcommands': True}
         audio_conf = {'num_mel_bins': 128, 
@@ -222,8 +227,12 @@ def main(args):
                                             img_size=(target_length[args.dataset],128),	
                                             mode=args.mode, use_custom_patch=args.use_custom_patch,	
                                             pos_trainable=args.pos_trainable, estimator_mode=args.estimator_mode, 
+                                            codebook_type=args.codebook_type, 
                                             code_num=args.code_num, code_dim=args.code_dim, codebook_set=args.codebook_set, 
                                             commitment_loss_weight=args.commitment_loss_weight, ema=args.ema, 
+                                            # for RQ codebook
+                                            restart_unused_codes=args.restart_unused_codes, 
+                                            init_weight_multiplier=args.init_weight_multiplier,
                                             no_shift=args.no_shift,
                                             )
     else:
@@ -232,6 +241,19 @@ def main(args):
 
     model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
                   cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)
+
+    # Resume training for iter2+ or training tokenizer
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location='cpu')
+        print("Load pre-trained checkpoint from: %s" % args.resume)
+        checkpoint_model = checkpoint['model']
+
+        # load pre-trained model
+        msg = model.load_state_dict(checkpoint_model, strict=False)
+        print(msg)
+
+    for name, p in model.named_parameters():
+        print(f"{name}: requires_grad = {p.requires_grad}")
     model.to(device)
 
     model_without_ddp = model
@@ -239,10 +261,6 @@ def main(args):
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     
-    if args.lr is None:  # only base_lr is specified
-        args.lr = args.blr * eff_batch_size / 256
-
-    print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
     print("actual lr: %.2e" % args.lr)
 
     print("accumulate grad iterations: %d" % args.accum_iter)
