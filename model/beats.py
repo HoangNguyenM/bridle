@@ -31,20 +31,15 @@ class BEATs(nn.Module):
         if train_encoder:
             self.encoder_decoder.train(True)
             self.tokenizer.train(False)
+            self.freeze_model(self.tokenizer)
         else:
             self.encoder_decoder.train(False)
             self.tokenizer.train(True)
-
+            self.freeze_model(self.encoder_decoder)
 
     def freeze_model(self, model):
         for p in model.parameters():
             p.requires_grad = False
-
-    def freeze_encoder_decoder(self):
-        self.freeze_model(self.encoder_decoder)
-
-    def freeze_tokenizer(self):
-        self.freeze_model(self.tokenizer)
 
     def _get_one_hot_labels(self, labels: Tensor, num_classes) -> Tensor:
         one_hot = torch.zeros(labels.size() + (num_classes,), device=labels.device)

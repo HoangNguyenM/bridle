@@ -14,6 +14,7 @@ from util.pos_embed import get_2d_sincos_pos_embed, get_2d_sincos_pos_embed_flex
 from util.patch_embed import PatchEmbed_new, PatchEmbed_org
 from .swin_transformer import SwinTransformerBlock
 from .quantizations import NormEMAVectorQuantizer
+from.rq_quantizations import RQBottleneck
 
 class BEATsTokenizer(nn.Module):
     """ BEATs Tokenizer with Vision Transformer Encoder, Quantizer and Estimator
@@ -24,9 +25,11 @@ class BEATsTokenizer(nn.Module):
                  mlp_ratio=4., norm_layer=nn.LayerNorm,
                  audio_exp=False, mode=0, contextual_depth=8,
                  use_custom_patch=False, pos_trainable=False, estimator_mode=0,
-                 code_num=1024, code_dim=256,
-                 codebook_set=1, commitment_loss_weight=0.25, ema=True,
+                 codebook_type="legacy", code_num=1024, code_dim=256,
+                 codebook_set=1, commitment_loss_weight=0.25, ema=True, 
                  epoch=0, no_shift=False,
+                 # specifics for RQ codebook
+                 restart_unused_codes=True, init_weight_multiplier=0.33,
                  ):
         super().__init__()
 
@@ -63,16 +66,32 @@ class BEATsTokenizer(nn.Module):
             nn.Tanh(),
             nn.Linear(embed_dim, code_dim)
         )
-        self.quantizer = NormEMAVectorQuantizer(
-            n_embed=code_num,
-            embedding_dim=code_dim,
-            beta=commitment_loss_weight,
-            kmeans_init=True,
-            decay=0.99,
-            ema=ema,
-        )
-        if not ema:
-            self.quantizer.embedding.weight.requires_grad = True
+        if codebook_type == "legacy":
+            self.quantizer = NormEMAVectorQuantizer(
+                n_embed=code_num,
+                embedding_dim=code_dim,
+                commitment_loss_weight=commitment_loss_weight,
+                kmeans_init=True,
+                decay=0.99,
+                ema=ema,
+            )
+
+            if not ema:
+                self.quantizer.embedding.weight.requires_grad = True
+        else:
+            self.quantizer = RQBottleneck(
+                latent_shape=[code_dim],
+                code_shape=[codebook_set],
+                n_embed=[code_num] * codebook_set,
+                ema=ema,
+                restart_unused_codes=restart_unused_codes,
+                init_weight_multiplier=init_weight_multiplier,
+                commitment_loss_weight=commitment_loss_weight,
+            )
+
+        if ema:
+            for p in self.quantizer.parameters():
+                p.requires_grad = False
 
         # --------------------------------------------------------------------------
         # Tokenizer estimator specifics

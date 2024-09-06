@@ -126,12 +126,12 @@ def norm_ema_inplace(moving_avg, new, decay):
 
 
 class NormEMAVectorQuantizer(nn.Module):
-    def __init__(self, n_embed, embedding_dim, beta, decay=0.99, eps=1e-5,
+    def __init__(self, n_embed, embedding_dim, commitment_loss_weight, decay=0.99, eps=1e-5,
                  statistic_code_usage=True, kmeans_init=False, codebook_init_path='', ema=True):
         super().__init__()
         self.codebook_dim = embedding_dim
         self.num_tokens = n_embed
-        self.beta = beta
+        self.commitment_loss_weight = commitment_loss_weight
         self.decay = decay
 
         # learnable = True if orthogonal_reg_weight > 0 else False
@@ -197,7 +197,7 @@ class NormEMAVectorQuantizer(nn.Module):
             norm_ema_inplace(self.embedding.weight, embed_normalized, self.decay)
 
         # compute loss for embedding
-        loss = F.mse_loss(z_q, z.detach()) + self.beta * F.mse_loss(z_q.detach(), z)
+        loss = F.mse_loss(z_q, z.detach()) + self.commitment_loss_weight * F.mse_loss(z_q.detach(), z)
 
         # preserve gradients
         z = z.view(-1, seq_len, hidden_dim)
