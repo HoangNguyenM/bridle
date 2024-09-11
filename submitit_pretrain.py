@@ -19,7 +19,7 @@ import submitit
 
 def parse_args():
     trainer_parser = trainer.get_args_parser()
-    parser = argparse.ArgumentParser("Submitit for BEATs pretrain", parents=[trainer_parser])
+    parser = argparse.ArgumentParser("BEATs pretrain", parents=[trainer_parser])
     parser.add_argument("--ngpus", default=8, type=int, help="Number of gpus to request on each node")
     parser.add_argument("--nodes", default=2, type=int, help="Number of nodes to request")
     parser.add_argument("--timeout", default=10080, type=int, help="Duration of the job") # in minutes
@@ -82,7 +82,7 @@ def main():
         args.job_dir = get_shared_folder() / "%j"
 
     # Note that the folder will depend on the job_id, to easily track experiments
-    executor = submitit.AutoExecutor(folder=args.job_dir, slurm_max_num_timeout=30)
+    executor = submitit.AutoExecutor(folder=args.job_dir, slurm_max_num_timeout=120)
 
     num_gpus_per_node = args.ngpus
     nodes = args.nodes
@@ -106,7 +106,7 @@ def main():
         **kwargs
     )
 
-    executor.update_parameters(name="beats")
+    executor.update_parameters(name="beats_pretrain")
 
     args.dist_url = get_init_file().as_uri()
     args.output_dir = args.job_dir

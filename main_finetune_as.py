@@ -42,7 +42,7 @@ from timm.models.vision_transformer import PatchEmbed
 from torch.utils.data import WeightedRandomSampler
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('BEATs fine-tuning for image classification', add_help=False)
+    parser = argparse.ArgumentParser('BEATs finetuning', add_help=False)
     parser.add_argument('--linear_probe', default=False, type=bool)
     parser.add_argument('--batch_size', default=4, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
@@ -53,12 +53,11 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--model', default='vit_b', type=str, metavar='MODEL',
                         help='Name of model to train')
-
     parser.add_argument('--input_size', default=224, type=int,
                         help='images input size')
-
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
+    parser.add_argument('--save_every_epoch', default=10, type=int,help='save_every_epoch')
 
     # Optimizer parameters
     parser.add_argument('--clip_grad', type=float, default=None, metavar='NORM',
@@ -180,7 +179,7 @@ def get_args_parser():
     parser.add_argument('--epoch_len', default=200000, type=int, help='num of samples/epoch with weight_sampler')
     parser.add_argument('--distributed_wrapper', type=bool, default=False, help='use distributedwrapper for weighted sampler')
     parser.add_argument('--replacement', type=bool, default=False, help='use weight_sampler')
-    parser.add_argument('--mask_2d', type=bool, default=True, help='use 2d masking')
+    parser.add_argument('--mask_2d', type=bool, default=False, help='use 2d masking')
     parser.add_argument('--load_video', type=bool, default=False, help='load video')
     parser.add_argument('--av_fusion', type=bool, default=False, help='load video')
     parser.add_argument('--n_frm', default=6, type=int, help='num of frames for video')
@@ -244,11 +243,11 @@ def main(args):
         dataset_val = build_dataset(is_train=False, args=args)
     else:
         # stats from audio mae
-        norm_stats = {'audioset':[-4.2677393, 4.5689974], 'k400':[-4.2677393, 4.5689974], 
-                      'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
-        # new analytical stats
-        # norm_stats = {'audioset':[-4.4446096, 3.3216383], 'k400':[-4.2677393, 4.5689974], 
+        # norm_stats = {'audioset':[-4.2677393, 4.5689974], 'k400':[-4.2677393, 4.5689974], 
         #               'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
+        # new analytical stats
+        norm_stats = {'audioset':[-4.4446096, 3.3216383], 'k400':[-4.2677393, 4.5689974], 
+                      'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
         
         target_length = {'audioset':1024, 'k400':1024, 'esc50':512, 'speechcommands':128}
         multilabel_dataset = {'audioset': True, 'esc50': False, 'k400': False, 'speechcommands': True}
@@ -474,7 +473,7 @@ def main(args):
                 log_writer=log_writer,
                 args=args
             )
-        if args.output_dir:
+        if args.output_dir and (epoch % args.save_every_epoch == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)

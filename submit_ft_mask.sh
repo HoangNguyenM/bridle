@@ -1,32 +1,11 @@
 #!/bin/bash
 
-if [ -z "$1" ]
-then
-	lr=1e-3
-else
-	lr=$1
-fi
+lr=5e-4
 
-if [ -z "$2" ]
-then
-	mask_t_prob=0.0
-else
-	mask_t_prob=$2
-fi
+mask_t_prob=0.2
+mask_f_prob=0.2
 
-if [ -z "$3" ]
-then
-	mask_f_prob=0.0
-else
-	mask_f_prob=$3
-fi
-
-if [ -z "$4" ]
-then
-	ckpt=/checkpoints/hoangmn/pretrain/365940/checkpoint-149.pth
-else
-	ckpt=$4
-fi
+ckpt=/checkpoints/hoangmn/pretrain/367008/checkpoint-140.pth
 
 audioset_bal_train_json=/fsx/hoangmn/audioset/bal_train.json
 audioset_train_all_json=/fsx/hoangmn/audioset/train_all.json
@@ -56,6 +35,6 @@ python submitit_finetune.py \
     --epochs 100 \
     --warmup_epochs 10 \
     --weight_sampler True \
-    --replacement False \
     --distributed_wrapper True \
     --mask_2d True \
+    # --replacement True \

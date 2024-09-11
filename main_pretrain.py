@@ -27,7 +27,7 @@ import timm.optim.optim_factory as optim_factory
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-from model.beats import BEATs
+from model.beats import BEATs, BEATsDualTrain
 import model.encoder_decoder as BEATs_encoder_decoder
 import model.tokenizer as BEATs_tokenizer
 
@@ -35,7 +35,7 @@ from unit_pretrain import train_one_epoch
 from dataset import AudiosetDataset
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('BEATs pre-training', add_help=False)
+    parser = argparse.ArgumentParser('BEATs pretrain', add_help=False)
     parser.add_argument('--batch_size', default=4, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=400, type=int)
@@ -46,8 +46,9 @@ def get_args_parser():
     parser.add_argument('--model', default='vit_b', type=str, metavar='MODEL',
                         help='Name of model to train')
 
-    parser.add_argument('--input_size', default=224, type=int,
-                        help='images input size')
+    parser.add_argument('--dual_train', action='store_true', help='train encoder decoder & tokenizer simultaneously')
+
+    parser.add_argument('--input_size', default=224, type=int, help='images input size')
 
     parser.add_argument('--mask_ratio', default=0.8, type=float, 
                         help='Masking ratio (percentage of removed patches).')
@@ -68,7 +69,6 @@ def get_args_parser():
     parser.add_argument('--mask_f_prob', default=0.3, type=float, help='ratio of masking freq')
     parser.add_argument('--mask_2d', type=bool, default=False, help='use 2d masking')
     parser.add_argument('--init_audio_with_video_mae', type=bool, default=False, help='init_audio_with_video_mae')
-    parser.set_defaults(audio_exp=True)
     parser.add_argument('--no_shift', type=bool, default=False, help='no_shift')
     
     # Codebook parameters
@@ -78,10 +78,10 @@ def get_args_parser():
     parser.add_argument('--codebook_set', default=1, type=int, help='Number of codebooks')
     parser.add_argument('--ema', default=True, type=bool, help='EMA update for tokenizer codebook training')
     parser.add_argument('--commitment_loss_weight', default=0.25, type=float, help='weight of commitment loss term during tokenizer training')
-    parser.add_argument('--cold_start', default=False, type=bool, help='Use cold start tokenizer or full tokenizer')
+    parser.add_argument('--cold_start', action='store_true', help='Use cold start tokenizer or full tokenizer')
     # RQ codebook specifics
     parser.add_argument('--restart_unused_codes', default=True, type=bool, help='restart unused codes in the first iteration')
-    parser.add_argument('--init_weight_multiplier', default=0.33, type=float, help='initial std of codebook weights')
+    parser.add_argument('--init_weight_multiplier', default=1., type=float, help='initial std of codebook weights')
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -101,7 +101,7 @@ def get_args_parser():
                         help='dataset path')
 
     # Training parameters
-    parser.add_argument('--train_encoder', type=bool, default=True, help='True: train encoder decoder, False: train tokenizer')
+    parser.add_argument('--train_encoder', action='store_true', help='True: train encoder decoder, False: train tokenizer')
     parser.add_argument('--output_dir', default='/checkpoints/hoangmn/pretrain',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='/checkpoints/hoangmn/pretrain',
@@ -110,6 +110,7 @@ def get_args_parser():
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
+    parser.add_argument('--prev_phase', default='', help='get previous phase checkpoint')
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
@@ -139,6 +140,7 @@ def get_args_parser():
     parser.add_argument("--dataset", type=str, default="audioset", help="dataset", choices=["audioset", "esc50", "speechcommands"])
     parser.add_argument("--use_fbank", type=bool, default=False)
     parser.add_argument("--fbank_dir", type=str, default="/fsx/hoangmn/esc_50/ESC-50-master/fbank", help="fbank dir")
+    parser.set_defaults(audio_exp=True)
 
     return parser
 
@@ -239,21 +241,31 @@ def main(args):
         encoder_decoder = BEATs_encoder_decoder.__dict__[args.model]()
         tokenizer = BEATs_tokenizer.__dict__[args.model]()
 
-    model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
-                  cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)
+    if args.dual_train:
+        model = BEATsDualTrain(
+            encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
+            model_loss=torch.nn.CrossEntropyLoss(),
+            codebook_type=args.codebook_type)
+    else:
+        model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
+            model_loss=torch.nn.CrossEntropyLoss(),
+            #   model_loss=torch.nn.BCEWithLogitsLoss(),
+            cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)
 
-    # Resume training for iter2+ or training tokenizer
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        print("Load pre-trained checkpoint from: %s" % args.resume)
+    # load previous phase training for iter2+ or training tokenizer
+    if args.prev_phase:
+        checkpoint = torch.load(args.prev_phase, map_location='cpu')
+        print("Load pre-trained checkpoint from: %s" % args.prev_phase)
         checkpoint_model = checkpoint['model']
 
         # load pre-trained model
-        msg = model.load_state_dict(checkpoint_model, strict=False)
+        msg = model.load_state_dict(checkpoint_model, strict=True)
         print(msg)
 
     for name, p in model.named_parameters():
         print(f"{name}: requires_grad = {p.requires_grad}")
+    if args.codebook_type == "legacy":
+        print(f"codebook training is {model.tokenizer.quantizer.training}")
     model.to(device)
 
     model_without_ddp = model
