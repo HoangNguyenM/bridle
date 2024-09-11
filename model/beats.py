@@ -9,15 +9,20 @@ from torch import nn, Tensor
 
 
 class BEATs(nn.Module):
-    """ Masked Autoencoder with VisionTransformer backbone
+    """ BEATs model with the following component: 
+        encoder - decoder: backbone is a masked auto encoder
+        tokenizer encoder: ViT, equivalent structure to main encoder
+        quantizer (codebook): VQ or RQ embeddings
+        tokenizer estimator: simple transformer
     """
     def __init__(self,
                  encoder_decoder: nn.Module,
                  tokenizer: nn.Module,
                  cold_start: bool = False,
                  train_encoder: bool = True,
-                 model_loss: nn.Module = nn.BCEWithLogitsLoss(),
+                 model_loss: nn.Module = nn.CrossEntropyLoss(),
                  codebook_type: str = "legacy",
+                 dual_train: bool = False,
                  ):
         super().__init__()
 
@@ -28,7 +33,10 @@ class BEATs(nn.Module):
         self.codebook_type = codebook_type
         self.model_loss = model_loss
 
-        if train_encoder:
+        if dual_train:
+            self.encoder_decoder.train(True)
+            self.tokenizer.train(True)
+        elif train_encoder:
             self.encoder_decoder.train(True)
             self.tokenizer.train(False)
             self.freeze_model(self.tokenizer)
@@ -93,7 +101,7 @@ class BEATs(nn.Module):
             embed_loss=None):
         
         # Use Cosine Similarity loss for training tokenizer and mse loss for the codebook
-        return self.tokenizer_loss(encoder_output, estimator_output) + embed_loss
+        return self.cosine_similarity_loss(encoder_output, estimator_output) + embed_loss
 
     def forward_encoder_training(self, x, mask_ratio=0.8):
         pred, mask = self.encoder_decoder(x, mask_ratio)
@@ -116,3 +124,31 @@ class BEATs(nn.Module):
             return self.forward_encoder_training(x, mask_ratio)
         else:
             return self.forward_tokenizer_training(x)
+        
+
+class BEATsDualTrain(BEATs):
+    """ BEATs upgraded to train both the encoder decoder and tokenizer simultaneously
+    """
+    def __init__(self,
+                 encoder_decoder: nn.Module,
+                 tokenizer: nn.Module,
+                 model_loss: nn.Module = nn.CrossEntropyLoss(),
+                 codebook_type: str = "legacy",
+                 tokenizer_loss_ratio: float = 0.1,
+                 ):
+        super().__init__(
+            encoder_decoder=encoder_decoder,
+            tokenizer=tokenizer,
+            cold_start=False,
+            train_encoder=True,
+            model_loss=model_loss,
+            codebook_type=codebook_type,
+            dual_train=True,
+        )
+
+        self.tokenizer_loss_ratio = tokenizer_loss_ratio
+
+    def forward(self, x, mask_ratio=0.8):
+        encoder_loss = self.forward_encoder_training(x, mask_ratio)
+        tokenizer_loss = self.forward_tokenizer_training(x)
+        return encoder_loss + self.tokenizer_loss_ratio * tokenizer_loss

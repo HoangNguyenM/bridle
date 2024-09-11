@@ -29,7 +29,7 @@ class BEATsTokenizer(nn.Module):
                  codebook_set=1, commitment_loss_weight=0.25, ema=True, 
                  epoch=0, no_shift=False,
                  # specifics for RQ codebook
-                 restart_unused_codes=True, init_weight_multiplier=0.33,
+                 restart_unused_codes=True, init_weight_multiplier=1.,
                  ):
         super().__init__()
 
@@ -95,9 +95,9 @@ class BEATsTokenizer(nn.Module):
 
         # --------------------------------------------------------------------------
         # Tokenizer estimator specifics
-        self.estimator_embed = nn.Linear(embed_dim, estimator_embed_dim, bias=True)
+        self.estimator_embed = nn.Linear(code_dim, estimator_embed_dim, bias=True)
 
-        self.estimator_pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, estimator_embed_dim), requires_grad=pos_trainable)  # fixed sin-cos embedding
+        self.estimator_pos_embed = nn.Parameter(torch.zeros(1, num_patches, estimator_embed_dim), requires_grad=pos_trainable)  # fixed sin-cos embedding
 
         self.no_shift=no_shift
 
@@ -134,10 +134,10 @@ class BEATsTokenizer(nn.Module):
             # Transfomer
             self.estimator_blocks = nn.ModuleList([
                 Block(estimator_embed_dim, estimator_num_heads, mlp_ratio, qkv_bias=True, qk_norm=False, norm_layer=norm_layer)
-                for i in range(estimator_depth)])
+                for _ in range(estimator_depth)])
 
         self.estimator_norm = norm_layer(estimator_embed_dim)
-        self.estimator_pred = nn.Linear(estimator_embed_dim, patch_size**2 * in_chans, bias=True) # estimator to patch
+        self.estimator_pred = nn.Linear(estimator_embed_dim, embed_dim, bias=True)
 
         # --------------------------------------------------------------------------
 
@@ -158,9 +158,9 @@ class BEATsTokenizer(nn.Module):
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         if self.audio_exp:   
-            estimator_pos_embed = get_2d_sincos_pos_embed_flexible(self.estimator_pos_embed.shape[-1], self.patch_embed.patch_hw, cls_token=True)
+            estimator_pos_embed = get_2d_sincos_pos_embed_flexible(self.estimator_pos_embed.shape[-1], self.patch_embed.patch_hw, cls_token=False)
         else:
-            estimator_pos_embed = get_2d_sincos_pos_embed(self.estimator_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=True)
+            estimator_pos_embed = get_2d_sincos_pos_embed(self.estimator_pos_embed.shape[-1], int(self.patch_embed.num_patches**.5), cls_token=False)
         self.estimator_pos_embed.data.copy_(torch.from_numpy(estimator_pos_embed).float().unsqueeze(0))
 
         # initialize patch_embed like nn.Linear (instead of nn.Conv2d)
@@ -253,20 +253,19 @@ class BEATsTokenizer(nn.Module):
             # quantize w/o cls token
             x = x[:, 1:, :]
 
+            x = self.quantize_layer(x)
+
         return self.quantizer(x)
 
     def forward_estimator(self, x):
-        # embed tokens
+        # embed tokens, default to no cls token
         x = self.estimator_embed(x)
-
-        # x = x[:, 1:, :]  # no cls token
 
         # add pos embed
         x = x + self.estimator_pos_embed
         
         if self.estimator_mode != 0:
             B,L,D=x.shape
-            x = x[:,1:,:]
             if self.use_custom_patch:
                 x = x.reshape(B,101,12,D)
                 x = torch.cat([x,x[:,-1,:].unsqueeze(1)],dim=1) # hack
@@ -282,16 +281,6 @@ class BEATsTokenizer(nn.Module):
         # predictor projection
         pred = self.estimator_pred(x)
 
-        # remove cls token
-        if self.estimator_mode != 0:
-            if self.use_custom_patch:
-                pred = pred.reshape(B,102,12,256)
-                pred = pred[:,:101,:,:]
-                pred = pred.reshape(B,1212,256)
-            else:
-                pred = pred
-        else:
-            pred = pred[:, 1:, :]
         return pred
 
     def forward(self, imgs, cold_start=False):

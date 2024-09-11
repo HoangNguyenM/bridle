@@ -373,14 +373,15 @@ class RQBottleneck(nn.Module):
         self,
         z: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        _, seq_len, hidden_dim = z.shape
+        bsz, seq_len, hidden_dim = z.shape
         z_flattened = z.reshape(-1, hidden_dim)
 
         quant_list, codes, loss_list = self.quantize(z_flattened)
 
         loss = torch.mean(torch.stack(loss_list))
         z_q = z_flattened + (quant_list[-1] - z_flattened).detach()
-        z_q = z_q.view(-1, seq_len, hidden_dim)
+        z_q = z_q.view(bsz, seq_len, hidden_dim)
+        codes = codes.view(bsz, seq_len, -1)
         return z_q, loss, codes
 
     @torch.no_grad()
