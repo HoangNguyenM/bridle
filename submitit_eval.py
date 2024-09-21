@@ -13,16 +13,16 @@ import os
 import uuid
 from pathlib import Path
 
-import main_pretrain as trainer
+import main_eval as trainer
 import submitit
 
 
 def parse_args():
     trainer_parser = trainer.get_args_parser()
-    parser = argparse.ArgumentParser("BEATs pretrain", parents=[trainer_parser])
+    parser = argparse.ArgumentParser("BEATs eval", parents=[trainer_parser])
     parser.add_argument("--ngpus", default=8, type=int, help="Number of gpus to request on each node")
     parser.add_argument("--nodes", default=2, type=int, help="Number of nodes to request")
-    parser.add_argument("--timeout", default=4320, type=int, help="Duration of the job") # in minutes
+    parser.add_argument("--timeout", default=10080, type=int, help="Duration of the job") # in minutes
     parser.add_argument("--job_dir", default="", type=str, help="Job dir. Leave empty for automatic.")
     parser.add_argument("--partition", default="learnai4p", type=str, help="Partition where to submit")
     parser.add_argument('--comment', default="", type=str, help="Comment to pass to scheduler")
@@ -32,7 +32,7 @@ def parse_args():
 def get_shared_folder() -> Path:
     user = os.getenv("USER")
     if Path("/checkpoints/").is_dir():
-        p = Path(f"/checkpoints/{user}/pretrain")
+        p = Path(f"/checkpoints/{user}/eval")
         p.mkdir(exist_ok=True)
         return p
     raise RuntimeError("No shared folder available")
@@ -52,7 +52,7 @@ class Trainer(object):
         self.args = args
 
     def __call__(self):
-        import main_pretrain as trainer
+        import main_eval as trainer
 
         self._setup_gpu_args()
         trainer.main(self.args)
@@ -99,14 +99,14 @@ def main():
         tasks_per_node=num_gpus_per_node,  # one task per GPU
         cpus_per_task=10,
         nodes=nodes,
-        timeout_min=timeout_min,  # max is 60 * 3 * 24
+        timeout_min=timeout_min,  # max is 60 * 7 * 24
         # Below are cluster dependent parameters
         slurm_partition=partition,
         slurm_signal_delay_s=120,
         **kwargs
     )
 
-    executor.update_parameters(name="beats_pretrain")
+    executor.update_parameters(name="beats_eval")
 
     args.dist_url = get_init_file().as_uri()
     args.output_dir = args.job_dir

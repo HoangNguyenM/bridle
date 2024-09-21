@@ -37,4 +37,4 @@ python submitit_finetune.py \
     --distributed_wrapper True \
     --mask_2d True \
     --weight_sampler \
-    --linear_probe \
+    # --replacement\

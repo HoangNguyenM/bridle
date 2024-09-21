@@ -31,7 +31,7 @@ from model.beats import BEATs, BEATsDualTrain
 import model.encoder_decoder as BEATs_encoder_decoder
 import model.tokenizer as BEATs_tokenizer
 
-from unit_pretrain import train_one_epoch
+from unit_eval import eval_epoch
 from dataset import AudiosetDataset
 
 def get_args_parser():
@@ -45,6 +45,8 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--model', default='vit_b', type=str, metavar='MODEL',
                         help='Name of model to train')
+
+    parser.add_argument('--dual_train', action='store_true', help='train encoder decoder & tokenizer simultaneously')
 
     parser.add_argument('--input_size', default=224, type=int, help='images input size')
 
@@ -69,11 +71,6 @@ def get_args_parser():
     parser.add_argument('--init_audio_with_video_mae', type=bool, default=False, help='init_audio_with_video_mae')
     parser.add_argument('--no_shift', type=bool, default=False, help='no_shift')
     
-    # use for dual training encoder and tokenizer
-    parser.add_argument('--dual_train', action='store_true', help='train encoder decoder & tokenizer simultaneously')
-    parser.add_argument('--tokenizer_train_step', default=5, type=int, help='frequency of training the tokenizer')
-    parser.add_argument('--tokenizer_loss_ratio', default=1.0, type=float, help='ratio of tokenizer loss vs encoder loss')
-    
     # Codebook parameters
     parser.add_argument('--codebook_type', default="legacy", type=str, help='Type of codebook: legacy or rq')
     parser.add_argument('--code_num', default=1024, type=int, help='Number of codes in a codebook')
@@ -85,7 +82,6 @@ def get_args_parser():
     # RQ codebook specifics
     parser.add_argument('--restart_unused_codes', default=True, type=bool, help='restart unused codes in the first iteration')
     parser.add_argument('--init_weight_multiplier', default=1., type=float, help='initial std of codebook weights')
-    parser.add_argument('--kmeans_init', action='store_true', help='kmeans init each codebook')
 
     # Optimizer parameters
     parser.add_argument('--weight_decay', type=float, default=0.05,
@@ -239,7 +235,6 @@ def main(args):
                                             # for RQ codebook
                                             restart_unused_codes=args.restart_unused_codes, 
                                             init_weight_multiplier=args.init_weight_multiplier,
-                                            kmeans_init=args.kmeans_init,
                                             no_shift=args.no_shift,
                                             )
     else:
@@ -250,45 +245,27 @@ def main(args):
         model = BEATsDualTrain(
             encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
-            codebook_type=args.codebook_type,
-            tokenizer_loss_ratio=args.tokenizer_loss_ratio)
+            codebook_type=args.codebook_type)
     else:
         model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
             #   model_loss=torch.nn.BCEWithLogitsLoss(),
             cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)
 
-    # load previous phase training for iter2+ or training tokenizer
-    if args.prev_phase:
-        checkpoint = torch.load(args.prev_phase, map_location='cpu')
-        print("Load pre-trained checkpoint from: %s" % args.prev_phase)
-        checkpoint_model = checkpoint['model']
-        # checkpoint_model = {k: v for k, v in checkpoint_model.items() if
-        #                     "estimator_pos_embed" not in k
-        #                     and "estimator_embed" not in k
-        #                     and "estimator_pred" not in k}
-        # load pre-trained model
-        msg = model.load_state_dict(checkpoint_model, strict=True)
-        print(msg)
+    # load model for evaluation
+    assert args.prev_phase is not None
 
-    for name, p in model.named_parameters():
-        print(f"{name}: requires_grad = {p.requires_grad}")
-    if args.codebook_type == "legacy":
-        print(f"codebook training is {model.tokenizer.quantizer.training}")
-    else:
-        for i, codebook in enumerate(model.tokenizer.quantizer.codebooks):
-            print(f"codebook {i} training is {codebook.training}")
+    checkpoint = torch.load(args.prev_phase, map_location='cpu')
+    print("Load pre-trained checkpoint from: %s" % args.prev_phase)
+    checkpoint_model = checkpoint['model']
+    # load pre-trained model
+    msg = model.load_state_dict(checkpoint_model, strict=True)
+    print(msg)
+
     model.to(device)
 
     model_without_ddp = model
     print("Model = %s" % str(model_without_ddp))
-
-    eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-    
-    print("actual lr: %.2e" % args.lr)
-
-    print("accumulate grad iterations: %d" % args.accum_iter)
-    print("effective batch size: %d" % eff_batch_size)
 
     if args.distributed:
         print('use distributed!!')
@@ -303,31 +280,14 @@ def main(args):
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
-    print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(
-            model, data_loader_train,
-            optimizer, device, epoch, loss_scaler,
-            dual_train=args.dual_train,
-            log_writer=log_writer,
-            args=args
-        )
-        if args.output_dir and (epoch % args.save_every_epoch == 0 or epoch + 1 == args.epochs):
-            misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
 
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        'epoch': epoch,}
-
-        if args.output_dir and misc.is_main_process():
-            if log_writer is not None:
-                log_writer.flush()
-            with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
-                f.write(json.dumps(log_stats) + "\n")
+    eval_epoch(
+        model, data_loader_train,
+        device, 0,
+        log_writer=log_writer,
+        args=args
+    )
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

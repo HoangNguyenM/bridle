@@ -1,4 +1,4 @@
-lr=5e-5
+lr=1e-4
 
 ckpt=/checkpoints/hoangmn/pretrain/366933/checkpoint-140.pth
 

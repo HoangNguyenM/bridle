@@ -21,7 +21,7 @@ import util.lr_sched as lr_sched
 def train_one_epoch(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
-                    train_encoder=True,
+                    dual_train=False,
                     log_writer=None,
                     args=None):
     
@@ -45,7 +45,6 @@ def train_one_epoch(model: torch.nn.Module,
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-
         #print(samples.shape)# 64x3x224x224 for img, 64x1x512x128 for audio
         samples = samples.to(device, non_blocking=True)
         
@@ -58,7 +57,13 @@ def train_one_epoch(model: torch.nn.Module,
 
 
         with torch.cuda.amp.autocast():
-            loss = model(samples, mask_ratio=args.mask_ratio)
+            # loss = model(samples, mask_ratio=args.mask_ratio)
+            if not dual_train:
+                loss = model(samples, mask_ratio=args.mask_ratio)
+            elif data_iter_step % args.tokenizer_train_step == 0:
+                loss = model(samples, mask_ratio=args.mask_ratio, tokenizer_training=True)
+            else:
+                loss = model(samples, mask_ratio=args.mask_ratio, tokenizer_training=False)
 
         loss_value = loss.item()
         loss_total = loss
