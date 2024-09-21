@@ -13,18 +13,6 @@ from torch.nn import functional as F
 
 
 class VQEmbedding(nn.Embedding):
-    """VQ embedding module with ema update for codebooks.
-    Arguments:
-        n_embed : int : size of the dictionary of embeddings
-        embed_dim : int : size of each embedding vector
-        ema : bool : if True, use exponential moving average for codebook update
-        decay : float : decay rate for ema update
-        restart_unused_codes : bool : if True, restart unused codes with random vectors
-        eps : float : epsilon value for numerical stability
-        training : bool : if True, used to init with weight multiplier
-        init_weight_multiplier: float : weight multiplier for initializing codebook weights
-    """
-
     def __init__(
         self,
         n_embed: int,
@@ -35,8 +23,9 @@ class VQEmbedding(nn.Embedding):
         eps: float = 1e-5,
         training: bool = True,
         init_weight_multiplier: float = 0.0001,
-    ) -> None:
-        if training:
+        kmeans_init: bool = False,
+    ):
+        if training and not kmeans_init:
             # initializing weights in the order of input data variance
             _weight = torch.rand(n_embed + 1, embed_dim) * init_weight_multiplier
             super().__init__(
@@ -50,7 +39,9 @@ class VQEmbedding(nn.Embedding):
         self.eps = eps
         self.restart_unused_codes = restart_unused_codes
         self.n_embed = n_embed
+        self.embed_dim = embed_dim
         self.training = training
+        self.kmeans_init = kmeans_init
 
         # The codebooks are updated with ema and not with backprop
         # This choice is inspired from https://arxiv.org/pdf/2306.08121.pdf for more stable training
@@ -63,12 +54,8 @@ class VQEmbedding(nn.Embedding):
             # self.weight[-1] is the padding index with zeroes, used for out-of-vocab embedding
             self.register_buffer("embed_ema", self.weight[:-1, :].detach().clone())
 
-    """
-        Computes distances of the input embeddings to the codebook
-        Arguments:
-            inputs : torch.Tensor : input embeddings
-        Returns: distances of the input embeddings to the codebook
-    """
+        if self.kmeans_init:
+            self.register_buffer('initted', torch.Tensor([False]))
 
     @torch.no_grad()
     def compute_distances(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -92,27 +79,12 @@ class VQEmbedding(nn.Embedding):
         )  # [B, n_embed or n_embed+1]
         return distances
 
-    """
-        Finds the nearest embeddings to the input embeddings
-        Arguments:
-            inputs : torch.Tensor : input embeddings
-        Returns: indices of the nearest embeddings to the input embeddings
-    """
-
     @torch.no_grad()
     def find_nearest_embedding(self, inputs: torch.Tensor) -> torch.Tensor:
         distances = self.compute_distances(inputs)  # [B, n_embed or n_embed+1]
         embed_idxs = distances.argmin(dim=-1)  # use padding index or not
 
         return embed_idxs
-
-    """
-        For the case we want to restart unused codes,
-        we tile the codebook embeddings with noise/ random vectors
-        Arguments:
-            x : torch.Tensor : input embeddings
-            target_n : int : target number of embeddings
-    """
 
     @torch.no_grad()
     def _tile_with_noise(self, x: torch.Tensor, target_n: int) -> torch.Tensor:
@@ -123,17 +95,8 @@ class VQEmbedding(nn.Embedding):
         x = x + torch.rand_like(x) * std
         return x
 
-    """
-        Updates cluster_sizes and per cluster vector sums based on current nearest neighbor indices.
-        Here we are also restarting unused codebook vectors with random sampled input vectors.
-        This happens only when the flag restart_unused_codes is True
-        Arguments:
-            vectors : torch.Tensor : input embeddings
-            idxs : torch.Tensor : indices of the nearest embeddings to the input embeddings
-    """
-
     @torch.no_grad()
-    def _update_buffers(self, vectors: torch.Tensor, idxs: torch.Tensor) -> None:
+    def _update_buffers(self, vectors: torch.Tensor, idxs: torch.Tensor):
         cluster_size, _ = self._get_cluster_size(vectors, idxs)
 
         embed_dim = self.weight.shape[-1]
@@ -159,21 +122,21 @@ class VQEmbedding(nn.Embedding):
             self.weight[:-1, :] = weight_update
             self.restart_unused_codes = False
 
-    """
-        Updates the codebook based on the current nearest neighbor indices
-        Embeddings updated with EMA after the buffers are updated for current batch
-
-    """
-
     @torch.no_grad()
     def _update_embedding(
         self,
         vectors: torch.Tensor,
         idxs: torch.Tensor,
-    ) -> None:
+    ):
         cluster_size, one_hot_idxs = self._get_cluster_size(vectors, idxs)
+        if dist.is_initialized():
+            dist.all_reduce(cluster_size)
+
         self._param_ema_update(self.cluster_size_ema, cluster_size, self.decay)
-        embed_sum = one_hot_idxs @ vectors.flatten(start_dim=0, end_dim=-2)
+        embed_sum = one_hot_idxs @ vectors
+        if dist.is_initialized():
+            dist.all_reduce(embed_sum)
+
         self._param_ema_update(self.embed_ema, embed_sum, self.decay)
 
         n_embed = self.weight.shape[0] - 1
@@ -185,6 +148,10 @@ class VQEmbedding(nn.Embedding):
         self.weight[:-1, :] = self.embed_ema / normalized_cluster_size.reshape(-1, 1)
 
     def forward(self, input: torch.Tensor):
+        if self.kmeans_init:
+            self.init_embed_(input.reshape(-1, self.embed_dim))
+            self.kmeans_init = False
+
         embed_idxs = self.find_nearest_embedding(input)
         # perform ema update
         if self.ema and self.training:
@@ -223,8 +190,22 @@ class VQEmbedding(nn.Embedding):
     @torch.no_grad()
     def _param_ema_update(
         self, params: torch.Tensor, new_value: torch.Tensor, decay: float
-    ) -> None:
+    ):
         params.data.mul_(decay).add_(new_value, alpha=(1 - decay))
+
+    @torch.jit.ignore
+    def init_embed_(self, data):
+        if self.initted:
+            return
+        print("Performing Kemans init for codebook")
+        embed, cluster_size = kmeans(data, self.n_embed, 10, use_cosine_sim=True)
+        if dist.is_initialized():
+            dist.all_reduce(cluster_size)
+            dist.all_reduce(embed, op=dist.ReduceOp.AVG)
+            
+        self.weight[:-1, :].data.copy_(embed)
+        self.cluster_size_ema.data.copy_(cluster_size)
+        self.kmeans_init = False
 
 
 class RQBottleneck(nn.Module):
@@ -249,6 +230,7 @@ class RQBottleneck(nn.Module):
         latent_shape: List[int],  # latent / bottleneck embedding dimension, eg. [32]
         code_shape: List[int],  # depth of codebooks, eg. [3]
         n_embed: List[int],  # number of embeddings in each codebook, eg. [256,256,256]
+        kmeans_init: bool = False,
         init_weight_multiplier: float = 0.0001,
         commitment_loss_weight: float = 0.25,
         training: bool = True,
@@ -256,7 +238,7 @@ class RQBottleneck(nn.Module):
         decay: float = 0.99,
         shared_codebook: bool = False,
         restart_unused_codes: bool = True,
-    ) -> None:
+    ):
         super().__init__()
 
         if not len(code_shape) == len(latent_shape) == 1:
@@ -301,6 +283,7 @@ class RQBottleneck(nn.Module):
                 decay=self.decay[0],
                 restart_unused_codes=restart_unused_codes,
                 init_weight_multiplier=init_weight_multiplier,
+                kmeans_init=kmeans_init,
                 training=training,
             )
 
@@ -316,6 +299,8 @@ class RQBottleneck(nn.Module):
                     decay=self.decay[idx],
                     restart_unused_codes=restart_unused_codes,
                     init_weight_multiplier=init_weight_multiplier,
+                    kmeans_init=kmeans_init,
+                    training=training,
                 )
                 for idx in range(self.code_shape[-1])
             ]
@@ -369,10 +354,7 @@ class RQBottleneck(nn.Module):
         codes = torch.cat(code_list, dim=-1)
         return quant_list, codes, loss_list
 
-    def forward(
-        self,
-        z: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, z: torch.Tensor):
         bsz, seq_len, hidden_dim = z.shape
         z_flattened = z.reshape(-1, hidden_dim)
 
@@ -385,92 +367,81 @@ class RQBottleneck(nn.Module):
         return z_q, loss, codes
 
     @torch.no_grad()
-    def embed_code(self, code: torch.Tensor) -> torch.Tensor:
-        assert code.shape[-1] == self.code_shape
+    def eval_codebooks(self, z: torch.Tensor):
+        bsz, seq_len, hidden_dim = z.shape
+        z_flattened = z.reshape(-1, hidden_dim)
 
-        code_slices = torch.chunk(code, chunks=code.shape[-1], dim=-1)
+        residual_feature = z_flattened
 
-        if self.shared_codebook:
-            embeds = [
-                self.codebooks[0].embed(code_slice)
-                for i, code_slice in enumerate(code_slices)
-            ]
+        quant_list: List[torch.Tensor] = []
+        code_list: List[torch.Tensor] = []
+
+        restore_training = False
+
+        # turn off EMA update if training is on
+        if self.codebooks[0].training:
+            restore_training = True
+            for i in range(self.code_shape[-1]):
+                self.codebooks[i].training = False
+
+        for i in range(self.code_shape[-1]):
+            quant, code = self.codebooks[i](residual_feature)
+
+            residual_feature = residual_feature - quant
+
+            quant_list.append(quant)
+            code_list.append(code.unsqueeze(-1))
+
+        # restore EMA update if training is on
+        if restore_training:
+            for i in range(self.code_shape[-1]):
+                self.codebooks[i].training = True
+
+        codes = torch.cat(code_list, dim=-1)
+        codes = codes.view(bsz, seq_len, -1)
+        
+        quants = torch.stack(quant_list, dim=-1)
+        quants = quants.view(bsz, seq_len, -1, self.code_shape[-1])
+        return quants, codes
+    
+def l2norm(t):
+    return F.normalize(t, p=2, dim=-1)
+
+def sample_vectors(samples, num):
+    num_samples, device = samples.shape[0], samples.device
+
+    if num_samples >= num:
+        indices = torch.randperm(num_samples, device=device)[:num]
+    else:
+        indices = torch.randint(0, num_samples, (num,), device=device)
+
+    return samples[indices]
+
+def kmeans(samples, num_clusters, num_iters=10, use_cosine_sim=False):
+    dim = samples.shape[-1]
+
+    means = sample_vectors(samples, num_clusters)
+
+    for _ in range(num_iters):
+        if use_cosine_sim:
+            dists = samples @ means.t()
         else:
-            embeds = [
-                self.codebooks[i].embed(code_slice)
-                for i, code_slice in enumerate(code_slices)
-            ]
+            # samples (n, d) -> (n, 1, d) and means (c, d) -> (1, c, d)
+            diffs = samples.unsqueeze(1) - means.unsqueeze(0)
+            dists = -(diffs ** 2).sum(dim=-1)
 
-        embeds = torch.cat(embeds, dim=-2).sum(-2)
+        buckets = dists.max(dim=-1).indices
+        bins = torch.bincount(buckets, minlength=num_clusters)
+        zero_mask = bins == 0
+        bins_min_clamped = bins.masked_fill(zero_mask, 1)
 
-        return embeds
+        new_means = buckets.new_zeros(num_clusters, dim, dtype=samples.dtype)
+        new_means.scatter_add_(0, buckets.unsqueeze(1).repeat(1, dim), samples)
+        new_means = new_means / bins_min_clamped[..., None]
 
-    @torch.no_grad()
-    def embed_code_with_depth(self, code: torch.Tensor) -> torch.Tensor:
-        """
-        do not reduce the code embedding over the axis of code-depth.
+        if use_cosine_sim:
+            new_means = l2norm(new_means)
 
-        Caution: RQ-VAE does not use scale of codebook, thus assume all scales are ones.
-        """
-        # spatial resolution can be different in the sampling process
-        assert code.shape[-1] == self.code_shape[-1]
+        means = torch.where(zero_mask[..., None], means, new_means)
 
-        code_slices = torch.chunk(code, chunks=code.shape[-1], dim=-1)
-
-        if self.shared_codebook:
-            embeds = [
-                self.codebooks[0].embed(code_slice)
-                for i, code_slice in enumerate(code_slices)
-            ]
-        else:
-            embeds = [
-                self.codebooks[i].embed(code_slice)
-                for i, code_slice in enumerate(code_slices)
-            ]
-
-        embeds = torch.cat(embeds, dim=-2)
-
-        return embeds
-
-    @torch.no_grad()
-    def embed_partial_code(
-        self, code: torch.Tensor, code_idx: int, decode_type: str = "select"
-    ) -> torch.Tensor:
-        r"""
-        Decode the input codes, using [0, 1, ..., code_idx] codebooks.
-
-        Arguments:
-            code (Tensor): codes of input image
-            code_idx (int): the index of the last selected codebook for decoding
-
-        Returns:
-            embeds (Tensor): quantized feature map
-        """
-
-        assert code.shape[1:] == self.code_shape
-        assert code_idx < code.shape[-1]
-
-        B, _ = code.shape
-
-        code_slices = torch.chunk(code, chunks=code.shape[-1], dim=-1)
-        if self.shared_codebook:
-            embeds = [
-                self.codebooks[0].embed(code_slice)
-                for i, code_slice in enumerate(code_slices)
-            ]
-        else:
-            embeds = [
-                self.codebooks[i].embed(code_slice)
-                for i, code_slice in enumerate(code_slices)
-            ]
-
-        if decode_type == "select":
-            embeds = embeds[code_idx].view(B, -1)
-        elif decode_type == "add":
-            embeds = torch.cat(embeds[: code_idx + 1], dim=-2).sum(-2)
-        else:
-            raise NotImplementedError(
-                f"{decode_type} is not implemented in partial decoding"
-            )
-
-        return embeds
+    return means, bins

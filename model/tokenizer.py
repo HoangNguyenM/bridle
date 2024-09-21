@@ -30,6 +30,7 @@ class BEATsTokenizer(nn.Module):
                  epoch=0, no_shift=False,
                  # specifics for RQ codebook
                  restart_unused_codes=True, init_weight_multiplier=1.,
+                 kmeans_init=False,
                  ):
         super().__init__()
 
@@ -86,12 +87,15 @@ class BEATsTokenizer(nn.Module):
                 ema=ema,
                 restart_unused_codes=restart_unused_codes,
                 init_weight_multiplier=init_weight_multiplier,
+                kmeans_init=kmeans_init,
                 commitment_loss_weight=commitment_loss_weight,
             )
 
         if ema:
             for p in self.quantizer.parameters():
                 p.requires_grad = False
+
+        self.codebook_type = codebook_type
 
         # --------------------------------------------------------------------------
         # Tokenizer estimator specifics
@@ -230,7 +234,7 @@ class BEATsTokenizer(nn.Module):
         return specs
 
 
-    def forward_encoder(self, x, cold_start=False):
+    def forward_encoder(self, x, cold_start=False, eval_codebooks=False):
         # embed patches
         x = self.patch_embed(x)
 
@@ -255,7 +259,13 @@ class BEATsTokenizer(nn.Module):
 
             x = self.quantize_layer(x)
 
-        return self.quantizer(x)
+        if not eval_codebooks:
+            return self.quantizer(x)
+        elif self.codebook_type == 'legacy':
+            z_q, _, enc_indices = self.quantizer(x)
+            return z_q, enc_indices
+        else:
+            return self.quantizer.eval_codebooks(x)
 
     def forward_estimator(self, x):
         # embed tokens, default to no cls token
@@ -291,6 +301,9 @@ class BEATsTokenizer(nn.Module):
         z_q, emb_loss, _ = self.forward_encoder(imgs)
         estimator_emb = self.forward_estimator(z_q)
         return estimator_emb, emb_loss
+    
+    def forward_eval_codebooks(self, imgs, cold_start=False):
+        return self.forward_encoder(imgs, cold_start, eval_codebooks=True)
     
 
 def tokenizer_vit_small_patch16(**kwargs):

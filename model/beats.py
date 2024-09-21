@@ -119,7 +119,12 @@ class BEATs(nn.Module):
         loss = self.tokenizer_training_loss(emb_enc, estimator_emb, emb_loss)
         return loss
     
-    def forward(self, x, mask_ratio=0.8):
+    def forward(self, x, mask_ratio=0.8, eval_codebooks=False):
+        if eval_codebooks:
+            with torch.no_grad():
+                z_q, enc_indices = self.tokenizer.forward_eval_codebooks(x, self.cold_start)
+            return z_q, enc_indices
+        
         if self.train_encoder:
             return self.forward_encoder_training(x, mask_ratio)
         else:
@@ -147,8 +152,32 @@ class BEATsDualTrain(BEATs):
         )
 
         self.tokenizer_loss_ratio = tokenizer_loss_ratio
+        
+    def _turn_on_codebook_training(self):
+        if self.codebook_type == "legacy":
+            self.tokenizer.quantizer.training = True
+        else:
+            for codebook in self.tokenizer.quantizer.codebooks:
+                codebook.training = True
 
-    def forward(self, x, mask_ratio=0.8):
+    def _turn_off_codebook_training(self):
+        if self.codebook_type == "legacy":
+            self.tokenizer.quantizer.training = False
+        else:
+            for codebook in self.tokenizer.quantizer.codebooks:
+                codebook.training = False
+
+    def forward(self, x, mask_ratio=0.8, tokenizer_training=True, eval_codebooks=False):
+        if eval_codebooks:
+            with torch.no_grad():
+                z_q, enc_indices = self.tokenizer.forward_eval_codebooks(x, self.cold_start)
+            return z_q, enc_indices
+        
+        self._turn_off_codebook_training()
         encoder_loss = self.forward_encoder_training(x, mask_ratio)
-        tokenizer_loss = self.forward_tokenizer_training(x)
-        return encoder_loss + self.tokenizer_loss_ratio * tokenizer_loss
+        if not tokenizer_training:
+            return encoder_loss
+        else:
+            self._turn_on_codebook_training()
+            tokenizer_loss = self.forward_tokenizer_training(x)
+            return encoder_loss + self.tokenizer_loss_ratio * tokenizer_loss
