@@ -99,7 +99,7 @@ class VQEmbedding(nn.Embedding):
 
         if dist.is_initialized():
             # mask reduced from all ranks to rank 0
-            mask = (cluster_size == 0)
+            mask = cluster_size == 0
             dist.reduce(mask, 0, op=dist.ReduceOp.MAX)
             random_ids = torch.randint(
                 0,
@@ -124,20 +124,19 @@ class VQEmbedding(nn.Embedding):
         idxs: torch.Tensor,
     ):
         cluster_size, one_hot_idxs = self._get_cluster_size(vectors, idxs)
+
         self._param_ema_update(self.cluster_size_ema, cluster_size, self.decay)
+        embed_sum = one_hot_idxs @ vectors
 
-        zero_mask = (cluster_size == 0)
-        bins = cluster_size.masked_fill(zero_mask, 1.)
-        embed_sum = vectors.t() @ one_hot_idxs
-        dist.all_reduce(embed_sum)
+        self._param_ema_update(self.embed_ema, embed_sum, self.decay)
 
-        embed_normalized = (embed_sum / bins.unsqueeze(0)).t()
-        embed_normalized = l2norm(embed_normalized)
+        n_embed = self.weight.shape[0] - 1
+        n = self.cluster_size_ema.sum()
+        normalized_cluster_size = (
+            n * (self.cluster_size_ema + self.eps) / (n + n_embed * self.eps)
+        )
 
-        embed_normalized = torch.where(zero_mask[..., None], self.weight[:-1, :],
-                                        embed_normalized)
-
-        self._param_ema_update(self.weight[:-1, :], embed_normalized, self.decay)
+        self.weight[:-1, :] = self.embed_ema / normalized_cluster_size.reshape(-1, 1)
 
     def forward(self, input: torch.Tensor):
         input = l2norm(input)
@@ -177,14 +176,30 @@ class VQEmbedding(nn.Embedding):
     ):
         n_embed, embed_dim = self.weight.shape[0] - 1, self.weight.shape[-1]
 
+        vectors = vectors.reshape(-1, embed_dim)
+        n_vectors = vectors.shape[0]
+
+        # Use the following to create one hot
+        idxs = idxs.reshape(-1)
+        one_hot_idxs = vectors.new_zeros(n_embed, n_vectors * self.soft_code)
+        one_hot_idxs.scatter_(
+            dim=0, index=idxs.unsqueeze(0), src=vectors.new_ones(1, n_vectors * self.soft_code)
+        )
+        cluster_size = one_hot_idxs.sum(dim=1)
+
         if self.soft_code > 1:
-            one_hot_idxs = torch.zeros((idxs.size(0), n_embed), dtype=vectors.dtype, device=vectors.device)
-            one_hot_idxs.scatter_(1, idxs, 1)
-        else:
-            one_hot_idxs = F.one_hot(idxs, n_embed).type(vectors.dtype)
-        
-        cluster_size = one_hot_idxs.sum(0)
-        dist.all_reduce(cluster_size)
+            one_hot_idxs = one_hot_idxs.view(n_embed, n_vectors, self.soft_code)
+            one_hot_idxs = one_hot_idxs.sum(dim=-1)
+
+        # # Use the following to create multi hot
+        # idxs = idxs.reshape(-1, self.soft_code)
+
+        # one_hot_idxs = vectors.new_zeros(n_vectors, n_embed)
+        # one_hot_idxs.scatter_add_(
+        #     dim=1, index=idxs, src=vectors.new_ones(n_vectors, self.soft_code)
+        # )
+
+        # cluster_size = one_hot_idxs.sum(dim=0)
 
         return cluster_size, one_hot_idxs
 
@@ -200,6 +215,9 @@ class VQEmbedding(nn.Embedding):
             return
         print("Performing Kmeans init for codebook")
         embed, cluster_size = kmeans(data, self.n_embed, 10, use_cosine_sim=True)
+        # if dist.is_initialized():
+        #     dist.all_reduce(cluster_size)
+        #     dist.all_reduce(embed, op=dist.ReduceOp.AVG)
             
         self.weight[:-1, :].data.copy_(embed)
         self.cluster_size_ema.data.copy_(cluster_size)

@@ -19,7 +19,7 @@ import timm.models.vision_transformer
 class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
     """ Vision Transformer with support for global average pooling
     """
-    def __init__(self, global_pool=False, mask_2d=True, use_custom_patch=False, **kwargs):
+    def __init__(self, global_pool=False, mask_2d=True, **kwargs):
         super(VisionTransformer, self).__init__(**kwargs)
 
         self.global_pool = global_pool
@@ -29,7 +29,6 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
             self.fc_norm = norm_layer(embed_dim)
         del self.norm  # remove the original norm
         self.mask_2d = mask_2d
-        self.use_custom_patch = use_custom_patch
 
     def forward_features(self, x):
         B = x.shape[0]
@@ -88,26 +87,16 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
         """
         
         N, L, D = x.shape  # batch, length, dim
-        if self.use_custom_patch:
-            # # for AS
-            T=101 #64,101
-            F=12 #8,12
-            # # for ESC
-            # T=50
-            # F=12 
-            # for SPC
-            # T=12
-            # F=12
-        else:
-            # ## for AS 
-            T=64
-            F=8
-            # ## for ESC
-            #T=32
-            #F=8            
-            ## for SPC
-            # T=8
-            # F=8
+
+        ## for AS 
+        T=64
+        F=8
+        ## for ESC
+        # T=32
+        # F=8
+        ## for SPC
+        # T=8
+        # F=8
         
         # mask T
         x = x.reshape(N, T, F, D)
@@ -144,7 +133,7 @@ class VisionTransformer(timm.models.vision_transformer.VisionTransformer):
         x = self.patch_embed(x) # 4, 512, 768
 
         x = x + self.pos_embed[:, 1:, :]
-        if self.random_masking_2d:
+        if self.mask_2d:
             x, mask, ids_restore = self.random_masking_2d(x, mask_t_prob, mask_f_prob)
         else:
             x, mask, ids_restore = self.random_masking(x, mask_t_prob)

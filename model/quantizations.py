@@ -94,7 +94,7 @@ class EmbeddingEMA(nn.Module):
     def init_embed_(self, data):
         if self.initted:
             return
-        print("Performing Kemans init for codebook")
+        print("Performing Kmeans init for codebook")
         embed, cluster_size = kmeans(data, self.num_tokens, 10, use_cosine_sim=True)
         self.weight.data.copy_(embed)
         self.cluster_size.data.copy_(cluster_size)

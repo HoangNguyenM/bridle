@@ -11,10 +11,10 @@ import torch.nn as nn
 
 from timm.models.vision_transformer import Block
 from util.pos_embed import get_2d_sincos_pos_embed, get_2d_sincos_pos_embed_flexible
-from util.patch_embed import PatchEmbed_new, PatchEmbed_org
+from util.patch_embed import PatchEmbed_org
 from .swin_transformer import SwinTransformerBlock
 from .quantizations import NormEMAVectorQuantizer
-from.rq_quantizations import RQBottleneck
+from .rq_quantizations import RQBottleneck
 
 class BEATsTokenizer(nn.Module):
     """ BEATs Tokenizer with Vision Transformer Encoder, Quantizer and Estimator
@@ -24,13 +24,13 @@ class BEATsTokenizer(nn.Module):
                  estimator_embed_dim=768, estimator_depth=3, estimator_num_heads=12,
                  mlp_ratio=4., norm_layer=nn.LayerNorm,
                  audio_exp=False, mode=0, contextual_depth=8,
-                 use_custom_patch=False, pos_trainable=False, estimator_mode=0,
+                 pos_trainable=False, estimator_mode=0,
                  codebook_type="legacy", code_num=1024, code_dim=256,
                  codebook_set=1, commitment_loss_weight=0.25, ema=True, 
                  epoch=0, no_shift=False,
                  # specifics for RQ codebook
                  restart_unused_codes=True, init_weight_multiplier=1.,
-                 kmeans_init=False,
+                 kmeans_init=False, soft_code=1,
                  ):
         super().__init__()
 
@@ -40,12 +40,8 @@ class BEATsTokenizer(nn.Module):
         self.estimator_embed_dim = estimator_embed_dim
         # --------------------------------------------------------------------------
         # Tokenizer encoder specifics
-        if use_custom_patch:
-            print(f'Use custom patch_emb with patch size: {patch_size}, stride: {stride}')
-            self.patch_embed = PatchEmbed_new(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, stride=stride)
-        else:
-            self.patch_embed = PatchEmbed_org(img_size, patch_size, in_chans, embed_dim)
-        self.use_custom_patch = use_custom_patch
+        self.patch_embed = PatchEmbed_org(img_size, patch_size, in_chans, embed_dim)
+
         num_patches = self.patch_embed.num_patches
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
@@ -89,6 +85,7 @@ class BEATsTokenizer(nn.Module):
                 init_weight_multiplier=init_weight_multiplier,
                 kmeans_init=kmeans_init,
                 commitment_loss_weight=commitment_loss_weight,
+                soft_code=soft_code,
             )
 
         if ema:
@@ -106,12 +103,10 @@ class BEATsTokenizer(nn.Module):
         self.no_shift=no_shift
 
         self.estimator_mode = estimator_mode
-        if self.use_custom_patch: # overlapped patches as in AST. Similar performance yet compute heavy
-            window_size= (6,6)
-            input_size = (102,12)
-        else:
-            window_size= (4,4)
-            input_size = (64,8)                
+
+        window_size= (4,4)
+        input_size = (64,8)
+
         if self.estimator_mode == 1:
             estimator_modules = []
             for index in range(16):
@@ -197,21 +192,12 @@ class BEATsTokenizer(nn.Module):
         #assert imgs.shape[2] == imgs.shape[3] and imgs.shape[2] % p == 0
         
         if self.audio_exp:
-            if self.use_custom_patch: # overlapped patch
-                h,w = self.patch_embed.patch_hw
-                # todo: fixed h/w patch size and stride size. Make hw custom in the future
-                x = imgs.unfold(2, self.patch_size, self.stride).unfold(3, self.patch_size, self.stride) # n,1,H,W -> n,1,h,w,p,p
-                x = x.reshape(shape=(imgs.shape[0], h*w, p**2 * 1))
-                #x = imgs.reshape(shape=(imgs.shape[0], 1, h, p, w, p))
-                #x = torch.einsum('nchpwq->nhwpqc', x)
-                #x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 1))
-            else:
-                h = imgs.shape[2] // p
-                w = imgs.shape[3] // p
-                #h,w = self.patch_embed.patch_hw
-                x = imgs.reshape(shape=(imgs.shape[0], 1, h, p, w, p))
-                x = torch.einsum('nchpwq->nhwpqc', x)
-                x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 1))
+            h = imgs.shape[2] // p
+            w = imgs.shape[3] // p
+            #h,w = self.patch_embed.patch_hw
+            x = imgs.reshape(shape=(imgs.shape[0], 1, h, p, w, p))
+            x = torch.einsum('nchpwq->nhwpqc', x)
+            x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 1))
         else:
             h = w = imgs.shape[2] // p
             x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
@@ -276,10 +262,6 @@ class BEATsTokenizer(nn.Module):
         
         if self.estimator_mode != 0:
             B,L,D=x.shape
-            if self.use_custom_patch:
-                x = x.reshape(B,101,12,D)
-                x = torch.cat([x,x[:,-1,:].unsqueeze(1)],dim=1) # hack
-                x = x.reshape(B,1224,D)
         if self.estimator_mode > 3: # mvit
             x = self.estimator_blocks(x)
         else:

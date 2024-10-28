@@ -131,7 +131,7 @@ class BEATs(nn.Module):
             return self.forward_tokenizer_training(x)
         
 
-class BEATsDualTrain(BEATs):
+class BRIDLE(BEATs):
     """ BEATs upgraded to train both the encoder decoder and tokenizer simultaneously
     """
     def __init__(self,
