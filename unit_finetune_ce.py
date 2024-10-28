@@ -10,25 +10,27 @@
 
 import math
 import sys
-from typing import Iterable
-import numpy as np
+from typing import Iterable, Optional
+
 import torch
+
+from timm.data import Mixup
+from timm.utils import accuracy
 
 import util.misc as misc
 import util.lr_sched as lr_sched
-from util.stat import calculate_stats, concat_all_gather
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, 
-                    loss_scaler, max_norm: float = 0, log_writer=None,
+                    device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
+                    mixup_fn: Optional[Mixup] = None, log_writer=None,
                     args=None):
     model.train(True)
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 500
+    print_freq = 20
 
     accum_iter = args.accum_iter
 
@@ -53,12 +55,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
-        if not args.audio_exp:
-            # use the following for single label
-            targets = _get_one_hot_labels(targets, num_classes=args.nb_classes)
+        if mixup_fn is not None:
+            samples, targets = mixup_fn(samples, targets)
 
         with torch.cuda.amp.autocast(dtype=training_precision):
-            outputs = model(samples, mask_t_prob=args.mask_t_prob, mask_f_prob=args.mask_f_prob)
+            outputs = model(samples)
             loss = criterion(outputs, targets)
 
         loss_value = loss.item()
@@ -102,15 +103,13 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 @torch.no_grad()
 def evaluate(data_loader, model, device, args=None):
-    criterion = torch.nn.BCEWithLogitsLoss()
+    criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = 'Test:'
 
     # switch to evaluation mode
     model.eval()
-    outputs=[]
-    targets=[]
 
     if args.precision == 'fp32':
         training_precision = torch.float32
@@ -119,46 +118,26 @@ def evaluate(data_loader, model, device, args=None):
     else:
         raise ValueError(f"precision {args.precision} not supported")
 
-    for batch in metric_logger.log_every(data_loader, 300, header):
-
+    for batch in metric_logger.log_every(data_loader, 10, header):
         images = batch[0]
-        target = batch[1]
-        
-        if not args.audio_exp:
-            # use the following for single label
-            target = _get_one_hot_labels(target, num_classes=args.nb_classes)
-
-        # vid = batch[2]
+        target = batch[-1]
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
         # compute output
         with torch.cuda.amp.autocast(dtype=training_precision):
             output = model(images)
+            loss = criterion(output, target)
 
-            if args.dist_eval:
-                output = concat_all_gather(output)
-                target = concat_all_gather(target)
-            outputs.append(output)
-            targets.append(target)
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
 
-    outputs=torch.cat(outputs).cpu().numpy()
-    targets=torch.cat(targets).cpu().numpy()
+        batch_size = images.shape[0]
+        metric_logger.update(loss=loss.item())
+        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
+        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
+          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
 
-    stats = calculate_stats(outputs, targets)
-    
-    if args.multilabel:
-        AP = [stat['AP'] for stat in stats]
-        mAP = np.mean([stat['AP'] for stat in stats])
-        print("mAP: {:.6f}".format(mAP))
-        return {"mAP": mAP, "AP": AP}
-    else:
-        AP = [stat['AP'] for stat in stats]
-        mAP = np.mean([stat['AP'] for stat in stats])
-        acc = np.mean([stat['acc'] for stat in stats])
-        print("mAP: {:.6f}, acc: {:.6f}".format(mAP, acc))
-        return {"mAP": mAP, "acc": acc}
-
-def _get_one_hot_labels(labels, num_classes):
-    one_hot = torch.zeros(labels.size() + (num_classes,), device=labels.device)
-    return one_hot.scatter(-1, labels[..., None], 1).squeeze(-1)
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

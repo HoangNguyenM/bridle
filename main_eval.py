@@ -27,7 +27,7 @@ import timm.optim.optim_factory as optim_factory
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-from model.beats import BEATs, BEATsDualTrain
+from model.beats import BEATs, BRIDLE
 import model.encoder_decoder as BEATs_encoder_decoder
 import model.tokenizer as BEATs_tokenizer
 
@@ -35,7 +35,7 @@ from unit_eval import eval_epoch
 from dataset import AudiosetDataset
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('BEATs pretrain', add_help=False)
+    parser = argparse.ArgumentParser('Eval', add_help=False)
     parser.add_argument('--batch_size', default=4, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=400, type=int)
@@ -101,6 +101,7 @@ def get_args_parser():
                         help='dataset path')
 
     # Training parameters
+    parser.add_argument('--precision', default='fp16', type=str, help='training precision')
     parser.add_argument('--train_encoder', action='store_true', help='True: train encoder decoder, False: train tokenizer')
     parser.add_argument('--output_dir', default='/checkpoints/hoangmn/pretrain',
                         help='path where to save, empty for no saving')
@@ -242,7 +243,7 @@ def main(args):
         tokenizer = BEATs_tokenizer.__dict__[args.model]()
 
     if args.dual_train:
-        model = BEATsDualTrain(
+        model = BRIDLE(
             encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
             codebook_type=args.codebook_type)
@@ -259,7 +260,7 @@ def main(args):
     print("Load pre-trained checkpoint from: %s" % args.prev_phase)
     checkpoint_model = checkpoint['model']
     # load pre-trained model
-    msg = model.load_state_dict(checkpoint_model, strict=True)
+    msg = model.load_state_dict(checkpoint_model, strict=False)
     print(msg)
 
     model.to(device)

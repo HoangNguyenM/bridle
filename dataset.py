@@ -105,10 +105,8 @@ def make_index_dict(label_csv):
     index_lookup = {}
     with open(label_csv, 'r') as f:
         csv_reader = csv.DictReader(f)
-        line_count = 0
         for row in csv_reader:
             index_lookup[row['mid']] = row['index']
-            line_count += 1
     return index_lookup
 
 def make_name_dict(label_csv):
@@ -129,7 +127,9 @@ def lookup_list(index_list, label_csv):
     return label_list
 
 class AudiosetDataset(Dataset):
-    def __init__(self, dataset_json_file, audio_conf, label_csv=None, use_fbank=False, fbank_dir=None, roll_mag_aug=False, load_video=False, mode='train'):
+    def __init__(self, dataset_json_file, audio_conf, label_csv=None, 
+                 use_fbank=False, fbank_dir=None, roll_mag_aug=False, 
+                 load_video=False, mode='train', dataset='audioset'):
         """
         Dataset that manages audio recordings
         :param audio_conf: Dictionary containing the audio loading and preprocessing settings
@@ -142,6 +142,9 @@ class AudiosetDataset(Dataset):
         self.fbank_dir = fbank_dir
 
         self.data = data_json
+        if dataset == 'esc50':
+            self.data = self.data['data']
+            
         self.audio_conf = audio_conf
         print('---------------the {:s} dataloader---------------'.format(self.audio_conf.get('mode')))
         if 'multilabel' in self.audio_conf.keys():
@@ -290,7 +293,8 @@ class AudiosetDataset(Dataset):
                 label_indices = torch.FloatTensor(label_indices)
             else:
                 # remark : for ft cross-ent
-                label_indices = int(self.index_dict[label_str])
+                # label_indices = int(self.index_dict[label_str])
+                label_indices = torch.FloatTensor(label_indices)
         # SpecAug for training (not for eval)
         freqm = torchaudio.transforms.FrequencyMasking(self.freqm)
         timem = torchaudio.transforms.TimeMasking(self.timem)
@@ -305,7 +309,7 @@ class AudiosetDataset(Dataset):
             fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
             fbank = torch.roll(fbank, np.random.randint(-10, 10), 0)
         # the output fbank shape is [time_frame_num, frequency_bins], e.g., [1024, 128]
-        return fbank.unsqueeze(0), label_indices, datum['wav']
+        return fbank.unsqueeze(0), label_indices
 
     def __len__(self):
         return len(self.data)

@@ -17,10 +17,12 @@ import torch
 import util.misc as misc
 import util.lr_sched as lr_sched
 
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
-def train_one_epoch(model: torch.nn.Module,
+def train_one_epoch_video(model: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
+                    normalize_target=True,
                     dual_train=False,
                     log_writer=None,
                     args=None):
@@ -47,21 +49,23 @@ def train_one_epoch(model: torch.nn.Module,
     else:
         raise ValueError(f"precision {args.precision} not supported")
 
-    for data_iter_step, (samples, _labels) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
-        samples = samples.to(device, non_blocking=True)
+        videos, bool_masked_pos = batch
+        videos = videos.to(device, non_blocking=True)
+        bool_masked_pos = bool_masked_pos.to(device, non_blocking=True).flatten(1).to(torch.bool)
 
         with torch.cuda.amp.autocast(dtype=training_precision):
             if not dual_train:
-                loss = model(samples, mask_ratio=args.mask_ratio)
+                loss = model(videos, mask=bool_masked_pos)
             elif data_iter_step % args.tokenizer_train_step == 0:
-                loss = model(samples, mask_ratio=args.mask_ratio, tokenizer_training=True)
+                loss = model(videos, mask=bool_masked_pos, tokenizer_training=True)
             else:
-                loss = model(samples, mask_ratio=args.mask_ratio, tokenizer_training=False)
+                loss = model(videos, mask=bool_masked_pos, tokenizer_training=False)
 
         loss_value = loss.item()
         loss_total = loss

@@ -26,16 +26,21 @@ import timm.optim.optim_factory as optim_factory
 
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
+from util.load_imagenet import get_imagenet_pretrained_model
 
-from model.beats import BEATs, BEATsDualTrain
 import model.encoder_decoder as BEATs_encoder_decoder
 import model.tokenizer as BEATs_tokenizer
 
+import model_video.encoder_decoder as video_encoder_decoder
+import model_video.tokenizer as video_tokenizer
+
 from unit_pretrain import train_one_epoch
+from unit_pretrain_video import train_one_epoch_video
 from dataset import AudiosetDataset
+from dataset_video import build_pretraining_dataset, DataAugmentationForVideoMAE
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('BEATs pretrain', add_help=False)
+    parser = argparse.ArgumentParser('Pretrain', add_help=False)
     parser.add_argument('--batch_size', default=4, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=400, type=int)
@@ -52,8 +57,8 @@ def get_args_parser():
                         help='Masking ratio (percentage of removed patches).')
 
     parser.add_argument('--mode', default=0, type=int,help='contrastive mode')
-    parser.add_argument('--save_every_epoch', default=20, type=int,help='save_every_epoch')
-    parser.add_argument('--use_custom_patch', type=bool, default=False, help='use custom patch and override timm PatchEmbed')
+    parser.add_argument('--save_every_epoch', default=10, type=int,help='save_every_epoch')
+    parser.add_argument('--save_min_epoch', default=1, type=int,help='min epoch to save')
     
     parser.add_argument('--roll_mag_aug', type=bool, default=False, help='use roll_mag_aug')	
     parser.add_argument('--split_pos', type=bool, default=False, help='use splitted pos emb')	
@@ -68,6 +73,11 @@ def get_args_parser():
     parser.add_argument('--mask_2d', type=bool, default=False, help='use 2d masking')
     parser.add_argument('--init_audio_with_video_mae', type=bool, default=False, help='init_audio_with_video_mae')
     parser.add_argument('--no_shift', type=bool, default=False, help='no_shift')
+
+    parser.add_argument('--drop_path', type=float, default=0.0, metavar='PCT',
+                        help='Drop path rate (default: 0.1)')
+    parser.add_argument('--decoder_depth', default=4, type=int,
+                        help='depth of decoder')
     
     # use for dual training encoder and tokenizer
     parser.add_argument('--dual_train', action='store_true', help='train encoder decoder & tokenizer simultaneously')
@@ -79,30 +89,27 @@ def get_args_parser():
     parser.add_argument('--code_num', default=1024, type=int, help='Number of codes in a codebook')
     parser.add_argument('--code_dim', default=256, type=int, help='Dimension of each code')
     parser.add_argument('--codebook_set', default=1, type=int, help='Number of codebooks')
-    parser.add_argument('--ema', default=True, type=bool, help='EMA update for tokenizer codebook training')
+    parser.add_argument('--ema', action='store_true', help='EMA update for tokenizer codebook training')
     parser.add_argument('--commitment_loss_weight', default=0.25, type=float, help='weight of commitment loss term during tokenizer training')
     parser.add_argument('--cold_start', action='store_true', help='Use cold start tokenizer or full tokenizer')
     # RQ codebook specifics
-    parser.add_argument('--restart_unused_codes', default=True, type=bool, help='restart unused codes in the first iteration')
+    parser.add_argument('--restart_unused_codes', action='store_false', help='restart unused codes in the first iteration')
     parser.add_argument('--init_weight_multiplier', default=1., type=float, help='initial std of codebook weights')
     parser.add_argument('--kmeans_init', action='store_true', help='kmeans init each codebook')
+    parser.add_argument('--soft_code', default=1, type=int, help='number of codes mapped to each input')
 
     # Optimizer parameters
-    parser.add_argument('--weight_decay', type=float, default=0.05,
-                        help='weight decay (default: 0.05)')
-
-    parser.add_argument('--lr', type=float, default=5e-4, metavar='LR',
-                        help='learning rate (absolute lr)')
-
-    parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
-                        help='lower lr bound for cyclic schedulers that hit 0')
-
-    parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
-                        help='epochs to warmup LR')
+    parser.add_argument('--weight_decay', type=float, default=0.05, help='weight decay (default: 0.05)')
+    parser.add_argument('--lr', type=float, default=5e-4, metavar='LR', help='learning rate (absolute lr)')
+    parser.add_argument('--min_lr', type=float, default=0., metavar='LR', help='lower lr bound for cyclic schedulers that hit 0')
+    parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N', help='epochs to warmup LR')
+    parser.add_argument('--precision', default='fp16', type=str, help='training precision')
 
     # Dataset parameters
+    parser.add_argument("--dataset", type=str, default="audioset", help="dataset", choices=["audioset", "esc50", "speechcommands", "k400"])
     parser.add_argument('--data_path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
+    parser.add_argument('--imagenet_pretrain', action='store_true', help='load imagenet pretrained model')
 
     # Training parameters
     parser.add_argument('--train_encoder', action='store_true', help='True: train encoder decoder, False: train tokenizer')
@@ -110,14 +117,12 @@ def get_args_parser():
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='/checkpoints/hoangmn/pretrain',
                         help='path where to tensorboard log')
-    parser.add_argument('--device', default='cuda',
-                        help='device to use for training / testing')
+    parser.add_argument('--device', default='cuda', help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--prev_phase', default='', help='get previous phase checkpoint')
 
-    parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
-                        help='start epoch')
+    parser.add_argument('--start_epoch', default=0, type=int, metavar='N', help='start epoch')
     parser.add_argument('--num_workers', default=10, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
@@ -125,26 +130,29 @@ def get_args_parser():
     parser.set_defaults(pin_mem=True)
 
     # distributed training parameters
-    parser.add_argument('--world_size', default=1, type=int,
-                        help='number of distributed processes')
+    parser.add_argument('--world_size', default=1, type=int, help='number of distributed processes')
     parser.add_argument('--local_rank', default=-1, type=int)
     parser.add_argument('--dist_on_itp', action='store_true')
-    parser.add_argument('--dist_url', default='env://',
-                        help='url used to set up distributed training')
+    parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     parser.add_argument("--distributed", type=bool, default=True)
 
     # For audioset
-    parser.add_argument('--audio_exp', type=bool, default=True, help='audio exp')
+    parser.add_argument('--audio_exp', action='store_false', help='audio exp')
     parser.add_argument("--data_train", type=str, default='/fsx/hoangmn/audioset/train_all.json', help="training data json")
     parser.add_argument("--data_eval", type=str, default='/fsx/hoangmn/audioset/eval.json', help="validation data json")    
     parser.add_argument("--label_csv", type=str, default='/fsx/hoangmn/audioset/class_labels_indices.csv', help="csv with class labels")
     parser.add_argument('--freqm', help='frequency mask max length', type=int, default=0) # pretraining 0
     parser.add_argument('--timem', help='time mask max length', type=int, default=0) # pretraining 0
     parser.add_argument("--mixup", type=float, default=0, help="how many (0-1) samples need to be mixup during training")
-    parser.add_argument("--dataset", type=str, default="audioset", help="dataset", choices=["audioset", "esc50", "speechcommands"])
     parser.add_argument("--use_fbank", type=bool, default=False)
     parser.add_argument("--fbank_dir", type=str, default="/fsx/hoangmn/esc_50/ESC-50-master/fbank", help="fbank dir")
-    parser.set_defaults(audio_exp=True)
+    
+    # For video dataset (Kinetics)
+    parser.add_argument('--num_frames', type=int, default= 16)
+    parser.add_argument('--sampling_rate', type=int, default= 4)
+    parser.add_argument('--patch_size', type=int, default= 16)
+    parser.add_argument('--mask_type', default='tube', choices=['random', 'tube'],
+                        type=str, help='masked strategy of video tokens/patches')
 
     return parser
 
@@ -164,18 +172,8 @@ def main(args):
 
     cudnn.benchmark = True
 
-    # simple augmentation
-    if not args.audio_exp:
-        transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
-    else:
-        # stats from audio mae
-        # norm_stats = {'audioset':[-4.2677393, 4.5689974], 'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
-        # new analytical stats
+    # audio dataset
+    if args.audio_exp:
         norm_stats = {'audioset':[-4.4446096, 3.3216383], 'esc50':[-6.6268077, 5.358466], 'speechcommands':[-6.845978, 5.5654526]}
 
         target_length = {'audioset':1024, 'esc50':512, 'speechcommands':128}
@@ -191,8 +189,24 @@ def main(args):
                       'std':norm_stats[args.dataset][1],
                       'multilabel':multilabel_dataset[args.dataset],
                       'noise':False}
-        dataset_train = AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, roll_mag_aug=args.roll_mag_aug,
-                                        load_video=args.load_video)
+        dataset_train = AudiosetDataset(args.data_train, label_csv=args.label_csv, audio_conf=audio_conf, 
+                                        roll_mag_aug=args.roll_mag_aug,
+                                        load_video=args.load_video, dataset=args.dataset)
+    # video dataset
+    elif args.dataset == 'k400':
+        args.window_size = (args.num_frames // 2, args.input_size // args.patch_size, args.input_size // args.patch_size)
+        transform_train = DataAugmentationForVideoMAE(args)
+        dataset_train = build_pretraining_dataset(args)
+    # image dataset
+    else:
+        # simple augmentation
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+        dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+        
     #print(dataset_train)
 
     if args.distributed:
@@ -220,34 +234,58 @@ def main(args):
     )
     
     # define the model
+    num_tokens = args.code_num * args.codebook_set * args.soft_code
+
     if args.audio_exp:
         encoder_decoder = BEATs_encoder_decoder.__dict__[args.model](in_chans=1, audio_exp=True,	
                                             img_size=(target_length[args.dataset],128),	
-                                            mode=args.mode, use_custom_patch=args.use_custom_patch,	
-                                            pos_trainable=args.pos_trainable, decoder_mode=args.decoder_mode, 
+                                            mode=args.mode,	pos_trainable=args.pos_trainable, decoder_mode=args.decoder_mode, 
                                             mask_2d=args.mask_2d, mask_t_prob=args.mask_t_prob, mask_f_prob=args.mask_f_prob, 
-                                            code_num=args.code_num, codebook_set=args.codebook_set, 
-                                            no_shift=args.no_shift,
+                                            num_tokens=num_tokens, no_shift=args.no_shift,
                                             )
         tokenizer = BEATs_tokenizer.__dict__[args.model](in_chans=1, audio_exp=True,	
                                             img_size=(target_length[args.dataset],128),	
-                                            mode=args.mode, use_custom_patch=args.use_custom_patch,	
-                                            pos_trainable=args.pos_trainable, estimator_mode=args.estimator_mode, 
+                                            mode=args.mode, pos_trainable=args.pos_trainable, estimator_mode=args.estimator_mode, 
+                                            # codebook specifics
                                             codebook_type=args.codebook_type, 
                                             code_num=args.code_num, code_dim=args.code_dim, codebook_set=args.codebook_set, 
                                             commitment_loss_weight=args.commitment_loss_weight, ema=args.ema, 
                                             # for RQ codebook
                                             restart_unused_codes=args.restart_unused_codes, 
                                             init_weight_multiplier=args.init_weight_multiplier,
-                                            kmeans_init=args.kmeans_init,
+                                            kmeans_init=args.kmeans_init, soft_code = args.soft_code,
                                             no_shift=args.no_shift,
                                             )
+    elif args.dataset == 'k400':
+        encoder_decoder = video_encoder_decoder.__dict__[args.model](decoder_num_classes=num_tokens, 
+                                            drop_path_rate=args.drop_path, decoder_depth=args.decoder_depth)
+        tokenizer = video_tokenizer.__dict__[args.model](drop_path_rate=args.drop_path, decoder_depth=args.decoder_depth,
+                                            # codebook specifics
+                                            codebook_type=args.codebook_type, 
+                                            code_num=args.code_num, code_dim=args.code_dim, codebook_set=args.codebook_set, 
+                                            commitment_loss_weight=args.commitment_loss_weight, ema=args.ema, 
+                                            # for RQ codebook
+                                            restart_unused_codes=args.restart_unused_codes, 
+                                            init_weight_multiplier=args.init_weight_multiplier,
+                                            kmeans_init=args.kmeans_init, soft_code=args.soft_code,)
     else:
-        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model]()
-        tokenizer = BEATs_tokenizer.__dict__[args.model]()
+        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model](num_tokens=num_tokens, no_shift=args.no_shift)
+        tokenizer = BEATs_tokenizer.__dict__[args.model](codebook_type=args.codebook_type, 
+                                            code_num=args.code_num, code_dim=args.code_dim, codebook_set=args.codebook_set, 
+                                            commitment_loss_weight=args.commitment_loss_weight, ema=args.ema, 
+                                            # for RQ codebook
+                                            restart_unused_codes=args.restart_unused_codes, 
+                                            init_weight_multiplier=args.init_weight_multiplier,
+                                            kmeans_init=args.kmeans_init, soft_code=args.soft_code,
+                                            no_shift=args.no_shift)
+
+    if args.dataset == 'k400':
+        from model_video.beats import BEATs3D as BEATs, BRIDLE3D as BRIDLE
+    else:
+        from model.beats import BEATs, BRIDLE
 
     if args.dual_train:
-        model = BEATsDualTrain(
+        model = BRIDLE(
             encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
             codebook_type=args.codebook_type,
@@ -255,7 +293,6 @@ def main(args):
     else:
         model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
-            #   model_loss=torch.nn.BCEWithLogitsLoss(),
             cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)
 
     # load previous phase training for iter2+ or training tokenizer
@@ -268,16 +305,31 @@ def main(args):
         #                     and "estimator_embed" not in k
         #                     and "estimator_pred" not in k}
         # load pre-trained model
-        msg = model.load_state_dict(checkpoint_model, strict=True)
+        if not args.train_encoder:
+            checkpoint_model = {k: v for k, v in checkpoint_model.items() if
+                                "initted" not in k and "codebook" not in k}
+        msg = model.load_state_dict(checkpoint_model, strict=False)
         print(msg)
+    elif args.imagenet_pretrain:
+        checkpoint = get_imagenet_pretrained_model()
+        checkpoint_model = checkpoint.state_dict()
+        checkpoint_model = {'encoder_decoder.' + k: v for k, v in checkpoint_model.items()}
+        msg = model.load_state_dict(checkpoint_model, strict=False)
+        print(f"Load imagenet pretrained model: {msg}")
 
     for name, p in model.named_parameters():
         print(f"{name}: requires_grad = {p.requires_grad}")
-    if args.codebook_type == "legacy":
-        print(f"codebook training is {model.tokenizer.quantizer.training}")
+    
+    if args.dataset == 'k400':
+        codebook = model.tokenizer.encoder.quantizer
     else:
-        for i, codebook in enumerate(model.tokenizer.quantizer.codebooks):
+        codebook = model.tokenizer.quantizer
+    if args.codebook_type == "legacy":
+        print(f"codebook training is {codebook.training}")
+    else:
+        for i, codebook in enumerate(codebook.codebooks):
             print(f"codebook {i} training is {codebook.training}")
+    del codebook
     model.to(device)
 
     model_without_ddp = model
@@ -301,21 +353,31 @@ def main(args):
     print(optimizer)
     loss_scaler = NativeScaler()
 
+    # Auto resume if job pre-empted
+    latest_ckpt = misc.find_latest_checkpoint(args)
+    if args.resume == '' and latest_ckpt is not None:
+        print(f"found existing checkpoint: {latest_ckpt}")
+        args.resume = latest_ckpt
+    
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     print(f"Start training for {args.epochs} epochs")
+    train_fn = train_one_epoch_video if args.dataset == 'k400' else train_one_epoch
+
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(
+        train_stats = train_fn(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             dual_train=args.dual_train,
             log_writer=log_writer,
             args=args
         )
-        if args.output_dir and (epoch % args.save_every_epoch == 0 or epoch + 1 == args.epochs):
+        
+        if args.output_dir and epoch >= args.save_min_epoch and \
+            (epoch % args.save_every_epoch == 0 or epoch + 1 == args.epochs):
             misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)

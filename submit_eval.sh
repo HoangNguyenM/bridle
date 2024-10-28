@@ -1,6 +1,6 @@
 lr=5e-4
 
-ckpt=/checkpoints/hoangmn/pretrain/367611/checkpoint-30.pth
+ckpt=/checkpoints/hoangmn/pretrain/375324/checkpoint-140.pth
 
 audioset_bal_train_json=/fsx/hoangmn/audioset/bal_train.json
 audioset_train_all_json=/fsx/hoangmn/audioset/train_all.json
@@ -21,7 +21,8 @@ python submitit_eval.py \
     --decoder_mode 1 \
     --estimator_mode 2 \
     --prev_phase $ckpt \
-    # --codebook_type rq \
-    # --codebook_set 4 \
-    # --code_num 256 \
+    --codebook_type rq \
+    --codebook_set 4 \
+    --code_num 256 \
     # --cold_start \
+    # --precision fp32 \

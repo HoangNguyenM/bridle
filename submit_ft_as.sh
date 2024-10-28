@@ -1,11 +1,11 @@
 #!/bin/bash
 
-lr=2e-3
+lr=2e-4
 
 mask_t_prob=0.2
 mask_f_prob=0.2
 
-ckpt=/checkpoints/hoangmn/pretrain/366933/checkpoint-140.pth
+ckpt=/checkpoints/hoangmn/pretrain/382046/checkpoint-130.pth
 
 audioset_bal_train_json=/fsx/hoangmn/audioset/bal_train.json
 audioset_train_all_json=/fsx/hoangmn/audioset/train_all.json
@@ -27,14 +27,15 @@ python submitit_finetune.py \
     --finetune $ckpt \
     --lr $lr \
     --dist_eval \
-    --batch_size 32 \
+    --batch_size 8 \
     --roll_mag_aug True \
     --mask_t_prob $mask_t_prob \
     --mask_f_prob $mask_f_prob \
     --first_eval_ep 20 \
-    --epochs 120 \
+    --epochs 200 \
     --warmup_epochs 10 \
     --distributed_wrapper True \
     --mask_2d True \
     --weight_sampler \
+    --precision fp32 \
     # --replacement\

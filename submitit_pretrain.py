@@ -19,12 +19,12 @@ import submitit
 
 def parse_args():
     trainer_parser = trainer.get_args_parser()
-    parser = argparse.ArgumentParser("BEATs pretrain", parents=[trainer_parser])
+    parser = argparse.ArgumentParser("Pretrain", parents=[trainer_parser])
     parser.add_argument("--ngpus", default=8, type=int, help="Number of gpus to request on each node")
     parser.add_argument("--nodes", default=2, type=int, help="Number of nodes to request")
     parser.add_argument("--timeout", default=4320, type=int, help="Duration of the job") # in minutes
     parser.add_argument("--job_dir", default="", type=str, help="Job dir. Leave empty for automatic.")
-    parser.add_argument("--partition", default="learnai4p", type=str, help="Partition where to submit")
+    parser.add_argument("--partition", default="learnai", type=str, help="Partition where to submit")
     parser.add_argument('--comment', default="", type=str, help="Comment to pass to scheduler")
     return parser.parse_args()
 
@@ -105,8 +105,10 @@ def main():
         slurm_signal_delay_s=120,
         **kwargs
     )
-
-    executor.update_parameters(name="beats_pretrain")
+    if args.audio_exp:
+        executor.update_parameters(name="pretrain_vision")
+    else:
+        executor.update_parameters(name="pretrain_audio")
 
     args.dist_url = get_init_file().as_uri()
     args.output_dir = args.job_dir

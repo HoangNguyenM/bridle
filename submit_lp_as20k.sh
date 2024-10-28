@@ -1,11 +1,11 @@
 #!/bin/bash
 
-lr=4e-3
+lr=5e-3
 
 mask_t_prob=0.2
 mask_f_prob=0.2
 
-ckpt=/checkpoints/hoangmn/pretrain/382046/checkpoint-130.pth
+ckpt=/checkpoints/hoangmn/pretrain/369510/checkpoint-130.pth
 
 audioset_bal_train_json=/fsx/hoangmn/audioset/bal_train.json
 audioset_train_all_json=/fsx/hoangmn/audioset/train_all.json
@@ -20,22 +20,21 @@ python submitit_finetune.py \
     --nodes 4 \
     --model vit_b \
     --dataset $dataset \
-    --data_train $audioset_train_all_json \
+    --data_train $audioset_bal_train_json \
     --data_eval $audioset_eval_json \
     --label_csv $audioset_label \
-    --weight_csv $audioset_train_all_weight \
+    --weight_csv $audioset_bal_train_weight \
     --finetune $ckpt \
     --lr $lr \
     --dist_eval \
     --batch_size 8 \
     --roll_mag_aug True \
-    --first_eval_ep 10 \
-    --epochs 250 \
-    --warmup_epochs 10 \
-    --distributed_wrapper True \
-    --weight_sampler \
     --linear_probe \
-    # --precision fp32 \
+    --first_eval_ep 20 \
+    --epochs 300 \
+    --warmup_epochs 8 \
+    --distributed_wrapper True \
     # --mask_t_prob $mask_t_prob \
     # --mask_f_prob $mask_f_prob \
     # --mask_2d True \
+    # --precision fp32 \

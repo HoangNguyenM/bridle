@@ -13,18 +13,18 @@ import os
 import uuid
 from pathlib import Path
 
-import main_finetune_as as trainer
+import main_finetune as trainer
 import submitit
 
 
 def parse_args():
     trainer_parser = trainer.get_args_parser()
-    parser = argparse.ArgumentParser("BEATs finetuning", parents=[trainer_parser])
+    parser = argparse.ArgumentParser("Finetuning", parents=[trainer_parser])
     parser.add_argument("--ngpus", default=8, type=int, help="Number of gpus to request on each node")
     parser.add_argument("--nodes", default=2, type=int, help="Number of nodes to request")
-    parser.add_argument("--timeout", default=10080, type=int, help="Duration of the job") # in minutes
+    parser.add_argument("--timeout", default=1440, type=int, help="Duration of the job") # in minutes
     parser.add_argument("--job_dir", default="", type=str, help="Job dir. Leave empty for automatic.")
-    parser.add_argument("--partition", default="learnai4p", type=str, help="Partition where to submit")
+    parser.add_argument("--partition", default="learnai", type=str, help="Partition where to submit")
     parser.add_argument('--comment', default="", type=str, help="Comment to pass to scheduler")
     return parser.parse_args()
 
@@ -52,7 +52,7 @@ class Trainer(object):
         self.args = args
 
     def __call__(self):
-        import main_finetune_as as trainer
+        import main_finetune as trainer
 
         self._setup_gpu_args()
         trainer.main(self.args)
@@ -106,7 +106,10 @@ def main():
         **kwargs
     )
 
-    executor.update_parameters(name="beats_finetune")
+    if args.linear_probe:
+        executor.update_parameters(name="linear_probe")
+    else:
+        executor.update_parameters(name="finetune")
 
     args.dist_url = get_init_file().as_uri()
     args.output_dir = args.job_dir
