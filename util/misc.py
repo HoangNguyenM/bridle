@@ -11,7 +11,9 @@
 import builtins
 import datetime
 import os
+import re
 import time
+
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -242,7 +244,8 @@ def init_distributed_mode(args):
     print('| distributed init (rank {}): {}, gpu {}'.format(
         args.rank, args.dist_url, args.gpu), flush=True)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
+                                         world_size=args.world_size, rank=args.rank,
+                                         timeout=datetime.timedelta(hours=9))
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
 
@@ -315,14 +318,36 @@ def load_model(args, model_without_ddp, optimizer, loss_scaler):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
         print("Resume checkpoint %s" % args.resume)
+        msg = model_without_ddp.load_state_dict(checkpoint['model'])
+        print(f"Load resume checkpoint with msg: {msg}")
+
         if 'optimizer' in checkpoint and 'epoch' in checkpoint and not (hasattr(args, 'eval') and args.eval):
             optimizer.load_state_dict(checkpoint['optimizer'])
             args.start_epoch = checkpoint['epoch'] + 1
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
             print("With optim & sched!")
+
+
+def find_latest_checkpoint(args):
+    # Regex to match the file pattern and extract the epoch number
+    pattern = re.compile(r'checkpoint-(\d+)\.pth')
+    max_epoch = -1
+    latest_file = None
+
+    for filename in os.listdir(args.output_dir):
+        match = pattern.match(filename)
+        if match:
+            epoch_num = int(match.group(1))
+            # Find the latest epoch
+            if epoch_num > max_epoch:
+                max_epoch = epoch_num
+                latest_file = filename
+    if latest_file:
+        return os.path.join(args.output_dir, latest_file)
+    else:
+        return None
 
 
 def all_reduce_mean(x):
