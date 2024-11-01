@@ -68,3 +68,6 @@ For image experiments, we conduct our research on the ImageNet-1K dataset standa
 
 For video experiments, we utilize the Kinetics-400 dataset. Note that due to data availability, the dataset we use have dimensions 512 (W) x 288 (H) (for VideoMAE, this is 320 x 568, then read with 320 x 256 window). The model is trained on the train split (~240K samples) and evaluated on the val (same as test) split (~20K samples, 400 classes).
 
+## Reference
+If you find this project useful in your research, please consider citing us:
+TBD.
