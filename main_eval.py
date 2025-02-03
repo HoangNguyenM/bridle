@@ -27,9 +27,9 @@ import timm.optim.optim_factory as optim_factory
 import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-from model.beats import BEATs, BRIDLE
-import model.encoder_decoder as BEATs_encoder_decoder
-import model.tokenizer as BEATs_tokenizer
+from model.bridle import BRIDLE, jointBRIDLE
+import model.encoder_decoder as BRIDLE_encoder_decoder
+import model.tokenizer as BRIDLE_tokenizer
 
 from unit_eval import eval_epoch
 from dataset import AudiosetDataset
@@ -218,7 +218,7 @@ def main(args):
     
     # define the model
     if args.audio_exp:
-        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model](in_chans=1, audio_exp=True,	
+        encoder_decoder = BRIDLE_encoder_decoder.__dict__[args.model](in_chans=1, audio_exp=True,	
                                             img_size=(target_length[args.dataset],128),	
                                             mode=args.mode, use_custom_patch=args.use_custom_patch,	
                                             pos_trainable=args.pos_trainable, decoder_mode=args.decoder_mode, 
@@ -226,7 +226,7 @@ def main(args):
                                             code_num=args.code_num, codebook_set=args.codebook_set, 
                                             no_shift=args.no_shift,
                                             )
-        tokenizer = BEATs_tokenizer.__dict__[args.model](in_chans=1, audio_exp=True,	
+        tokenizer = BRIDLE_tokenizer.__dict__[args.model](in_chans=1, audio_exp=True,	
                                             img_size=(target_length[args.dataset],128),	
                                             mode=args.mode, use_custom_patch=args.use_custom_patch,	
                                             pos_trainable=args.pos_trainable, estimator_mode=args.estimator_mode, 
@@ -239,16 +239,16 @@ def main(args):
                                             no_shift=args.no_shift,
                                             )
     else:
-        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model]()
-        tokenizer = BEATs_tokenizer.__dict__[args.model]()
+        encoder_decoder = BRIDLE_encoder_decoder.__dict__[args.model]()
+        tokenizer = BRIDLE_tokenizer.__dict__[args.model]()
 
     if args.dual_train:
-        model = BRIDLE(
+        model = jointBRIDLE(
             encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
             codebook_type=args.codebook_type)
     else:
-        model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
+        model = BRIDLE(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
             #   model_loss=torch.nn.BCEWithLogitsLoss(),
             cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)

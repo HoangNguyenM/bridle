@@ -28,8 +28,8 @@ import util.misc as misc
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.load_imagenet import get_imagenet_pretrained_model
 
-import model.encoder_decoder as BEATs_encoder_decoder
-import model.tokenizer as BEATs_tokenizer
+import model.encoder_decoder as BRIDLE_encoder_decoder
+import model.tokenizer as BRIDLE_tokenizer
 
 import model_video.encoder_decoder as video_encoder_decoder
 import model_video.tokenizer as video_tokenizer
@@ -237,13 +237,13 @@ def main(args):
     num_tokens = args.code_num * args.codebook_set * args.soft_code
 
     if args.audio_exp:
-        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model](in_chans=1, audio_exp=True,	
+        encoder_decoder = BRIDLE_encoder_decoder.__dict__[args.model](in_chans=1, audio_exp=True,	
                                             img_size=(target_length[args.dataset],128),	
                                             mode=args.mode,	pos_trainable=args.pos_trainable, decoder_mode=args.decoder_mode, 
                                             mask_2d=args.mask_2d, mask_t_prob=args.mask_t_prob, mask_f_prob=args.mask_f_prob, 
                                             num_tokens=num_tokens, no_shift=args.no_shift,
                                             )
-        tokenizer = BEATs_tokenizer.__dict__[args.model](in_chans=1, audio_exp=True,	
+        tokenizer = BRIDLE_tokenizer.__dict__[args.model](in_chans=1, audio_exp=True,	
                                             img_size=(target_length[args.dataset],128),	
                                             mode=args.mode, pos_trainable=args.pos_trainable, estimator_mode=args.estimator_mode, 
                                             # codebook specifics
@@ -269,8 +269,8 @@ def main(args):
                                             init_weight_multiplier=args.init_weight_multiplier,
                                             kmeans_init=args.kmeans_init, soft_code=args.soft_code,)
     else:
-        encoder_decoder = BEATs_encoder_decoder.__dict__[args.model](num_tokens=num_tokens, no_shift=args.no_shift)
-        tokenizer = BEATs_tokenizer.__dict__[args.model](codebook_type=args.codebook_type, 
+        encoder_decoder = BRIDLE_encoder_decoder.__dict__[args.model](num_tokens=num_tokens, no_shift=args.no_shift)
+        tokenizer = BRIDLE_tokenizer.__dict__[args.model](codebook_type=args.codebook_type, 
                                             code_num=args.code_num, code_dim=args.code_dim, codebook_set=args.codebook_set, 
                                             commitment_loss_weight=args.commitment_loss_weight, ema=args.ema, 
                                             # for RQ codebook
@@ -280,18 +280,18 @@ def main(args):
                                             no_shift=args.no_shift)
 
     if args.dataset == 'k400':
-        from model_video.beats import BEATs3D as BEATs, BRIDLE3D as BRIDLE
+        from model_video.bridle import BRIDLE3D as BRIDLE, jointBRIDLE3D as jointBRIDLE
     else:
-        from model.beats import BEATs, BRIDLE
+        from model.bridle import BRIDLE, jointBRIDLE
 
     if args.dual_train:
-        model = BRIDLE(
+        model = jointBRIDLE(
             encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
             codebook_type=args.codebook_type,
             tokenizer_loss_ratio=args.tokenizer_loss_ratio)
     else:
-        model = BEATs(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
+        model = BRIDLE(encoder_decoder=encoder_decoder, tokenizer=tokenizer, 
             model_loss=torch.nn.CrossEntropyLoss(),
             cold_start=args.cold_start, train_encoder=args.train_encoder, codebook_type=args.codebook_type)
 

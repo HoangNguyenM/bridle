@@ -3,13 +3,18 @@
 
 # LICENSE file in the root directory of this source tree.
 
+# --------------------------------------------------------
+# References:
+# BEATs: https://github.com/microsoft/unilm/tree/master/beats
+# --------------------------------------------------------
+
 
 import torch
 from torch import nn, Tensor
 
 
-class BEATs3D(nn.Module):
-    """ BEATs model with the following component: 
+class BRIDLE3D(nn.Module):
+    """ BRIDLE model with the following component: 
         encoder - decoder: backbone is a masked auto encoder
         tokenizer encoder: ViT, equivalent structure to main encoder
         quantizer (codebook): VQ or RQ embeddings
@@ -114,8 +119,8 @@ class BEATs3D(nn.Module):
             return self.forward_tokenizer_training(x)
         
 
-class BRIDLE3D(BEATs3D):
-    """ BEATs upgraded to train both the encoder decoder and tokenizer simultaneously
+class jointBRIDLE3D(BRIDLE3D):
+    """ BRIDLE3D upgraded to train both the encoder decoder and tokenizer simultaneously
     """
     def __init__(self,
                  encoder_decoder: nn.Module,

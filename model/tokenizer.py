@@ -16,8 +16,8 @@ from .swin_transformer import SwinTransformerBlock
 from .quantizations import NormEMAVectorQuantizer
 from .rq_quantizations import RQBottleneck
 
-class BEATsTokenizer(nn.Module):
-    """ BEATs Tokenizer with Vision Transformer Encoder, Quantizer and Estimator
+class BRIDLETokenizer(nn.Module):
+    """ BRIDLE Tokenizer with Vision Transformer Encoder, Quantizer and Estimator
     """
     def __init__(self, img_size=224, patch_size=16, stride=10, in_chans=3,
                  embed_dim=768, depth=12, num_heads=12,
@@ -289,21 +289,21 @@ class BEATsTokenizer(nn.Module):
     
 
 def tokenizer_vit_small_patch16(**kwargs):
-    model = BEATsTokenizer(
+    model = BRIDLETokenizer(
         patch_size=16, embed_dim=384, depth=12, num_heads=6,
         estimator_embed_dim=384, estimator_num_heads=6,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 def tokenizer_vit_base_patch16(**kwargs):
-    model = BEATsTokenizer(
+    model = BRIDLETokenizer(
         patch_size=16, embed_dim=768, depth=12, num_heads=12,
         estimator_embed_dim=768, estimator_num_heads=12,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 def tokenizer_vit_large_patch16(**kwargs):
-    model = BEATsTokenizer(
+    model = BRIDLETokenizer(
         patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         estimator_embed_dim=1024, estimator_num_heads=16,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)

@@ -1,4 +1,11 @@
-# BRIDLE
+# BRIDLE: Generalized Self-supervised Learning with Quantization
+
+**Authors:**  
+Hoang M. Nguyen¹², Satya N. Shukla², Qiang Zhang², Hanchao Yu²,  
+Sreya D. Roy², Taipeng Tian², Lingjiong Zhu¹, Yuchen Liu²  
+
+¹ Florida State University  
+² Meta Platforms Inc.
 
 ## References
 
@@ -13,21 +20,10 @@ We want to thank the following amazing repositories, which serve as great refere
 
 To set up the environments required for this project, please follow the instructions below:
 
-### Audio and Images
-
-For audio and image processing, use the `env_mae.yml` file to create the environment:
+Use the `env_mae.yml` file to create the environment:
 
 ```bash
 conda env create -f env_mae.yml
-conda activate your_env_name
-```
-
-### Video
-
-For video processing, use the `env_videomae.yml` file to create the environment:
-
-```bash
-conda env create -f env_videomae.yml
 conda activate your_env_name
 ```
 
@@ -69,5 +65,11 @@ For image experiments, we conduct our research on the ImageNet-1K dataset standa
 For video experiments, we utilize the Kinetics-400 dataset. Note that due to data availability, the dataset we use have dimensions 512 (W) x 288 (H) (for VideoMAE, this is 320 x 568, then read with 320 x 256 window). The model is trained on the train split (~240K samples) and evaluated on the val (same as test) split (~20K samples, 400 classes).
 
 ## Reference
-If you find this project useful in your research, please consider citing us:
-TBD.
+If you find this project useful in your research, please consider citing us.
+
+```bibtex
+@article{nguyen2024bridle,
+  title={BRIDLE: Generalized Self-supervised Learning with Quantization},
+  author={Nguyen, Hoang M. and Shukla, Satya N. and Zhang, Qiang and Yu, Hanchao and Roy, Sreya D. and Tian, Taipeng and Zhu, Lingjiong and Liu, Yuchen},
+  year={2024},
+}
