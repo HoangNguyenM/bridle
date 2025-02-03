@@ -36,6 +36,8 @@ from util_video.utils import multiple_samples_collate
 import model.vit as vit
 import model_video.vvit as vvit
 
+from unit_finetune import train_one_epoch
+
 from dataset import AudiosetDataset, DistributedWeightedSampler, DistributedSamplerWrapper
 
 from torch.utils.data import WeightedRandomSampler
@@ -413,31 +415,32 @@ def main(args):
             new_embed_weights = embed_weights[:, 128:384, :]
             checkpoint_model['pos_embed'] = torch.cat([embed_weights[:, :1, :], new_embed_weights], dim=1)
         elif args.dataset == 'k400':
-            pos_embed_checkpoint = checkpoint_model['pos_embed']
-            embedding_size = pos_embed_checkpoint.shape[-1] # channel dim
-            num_patches = model.patch_embed.num_patches # 
-            num_extra_tokens = model.pos_embed.shape[-2] - num_patches # 0/1
+            if 'pos_embed' in checkpoint_model:
+                pos_embed_checkpoint = checkpoint_model['pos_embed']
+                embedding_size = pos_embed_checkpoint.shape[-1] # channel dim
+                num_patches = model.patch_embed.num_patches # 
+                num_extra_tokens = model.pos_embed.shape[-2] - num_patches # 0/1
 
-            # height (== width) for the checkpoint position embedding 
-            orig_size = int(((pos_embed_checkpoint.shape[-2] - num_extra_tokens)//(args.num_frames // model.patch_embed.tubelet_size)) ** 0.5)
-            # height (== width) for the new position embedding
-            new_size = int((num_patches // (args.num_frames // model.patch_embed.tubelet_size) )** 0.5)
-            # class_token and dist_token are kept unchanged
-            if orig_size != new_size:
-                print("Position interpolate from %dx%d to %dx%d" % (orig_size, orig_size, new_size, new_size))
-                extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
-                # only the position tokens are interpolated
-                pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
-                # B, L, C -> BT, H, W, C -> BT, C, H, W
-                pos_tokens = pos_tokens.reshape(-1, args.num_frames // model.patch_embed.tubelet_size, orig_size, orig_size, embedding_size)
-                pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
-                pos_tokens = torch.nn.functional.interpolate(
-                    pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
-                # BT, C, H, W -> BT, H, W, C ->  B, T, H, W, C
-                pos_tokens = pos_tokens.permute(0, 2, 3, 1).reshape(-1, args.num_frames // model.patch_embed.tubelet_size, new_size, new_size, embedding_size) 
-                pos_tokens = pos_tokens.flatten(1, 3) # B, L, C
-                new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
-                checkpoint_model['pos_embed'] = new_pos_embed
+                # height (== width) for the checkpoint position embedding 
+                orig_size = int(((pos_embed_checkpoint.shape[-2] - num_extra_tokens)//(args.num_frames // model.patch_embed.tubelet_size)) ** 0.5)
+                # height (== width) for the new position embedding
+                new_size = int((num_patches // (args.num_frames // model.patch_embed.tubelet_size) )** 0.5)
+                # class_token and dist_token are kept unchanged
+                if orig_size != new_size:
+                    print("Position interpolate from %dx%d to %dx%d" % (orig_size, orig_size, new_size, new_size))
+                    extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
+                    # only the position tokens are interpolated
+                    pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
+                    # B, L, C -> BT, H, W, C -> BT, C, H, W
+                    pos_tokens = pos_tokens.reshape(-1, args.num_frames // model.patch_embed.tubelet_size, orig_size, orig_size, embedding_size)
+                    pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
+                    pos_tokens = torch.nn.functional.interpolate(
+                        pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
+                    # BT, C, H, W -> BT, H, W, C ->  B, T, H, W, C
+                    pos_tokens = pos_tokens.permute(0, 2, 3, 1).reshape(-1, args.num_frames // model.patch_embed.tubelet_size, new_size, new_size, embedding_size) 
+                    pos_tokens = pos_tokens.flatten(1, 3) # B, L, C
+                    new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+                    checkpoint_model['pos_embed'] = new_pos_embed
 
         if not args.eval:
             for k in ['head.weight', 'head.bias']:
@@ -491,21 +494,22 @@ def main(args):
 
     if args.use_soft:
         criterion = SoftTargetCrossEntropy()
-    elif args.audio_exp:
+    elif args.criterion == 'bce':
         criterion = nn.BCEWithLogitsLoss()
     else:
         criterion = nn.CrossEntropyLoss()
     
     print("criterion = %s" % str(criterion))
 
-    if args.audio_exp:
-        from unit_finetune_as import train_one_epoch, evaluate
+    if args.multilabel:
+        from unit_finetune import evaluate_multilabel as evaluate
     else:
-        from unit_finetune_ce import train_one_epoch, evaluate
+        from unit_finetune import evaluate_single_label as evaluate
 
     misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     if args.eval:
+        # currently only support AudioSet
         test_stats = evaluate(data_loader_val, model, device, args.dist_eval)
         with open('aps.txt', 'w') as fp:
             aps=test_stats['AP']
@@ -526,7 +530,7 @@ def main(args):
         train_stats = train_one_epoch(
                 model, criterion, data_loader_train,
                 optimizer, device, epoch, loss_scaler,
-                args.clip_grad, log_writer=log_writer,
+                args.clip_grad, mixup_fn, log_writer=log_writer,
                 args=args
             )
         
@@ -545,12 +549,14 @@ def main(args):
                 print(f'Max mAP: {max_mAP:.4f}')
             else:
                 print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.4f}")
-                max_mAP = max(max_mAP, test_stats["mAP"])
                 max_acc1 = max(max_acc1, test_stats["acc1"])
                 max_acc5 = max(max_acc5, test_stats["acc5"])
-                print(f'Max mAP: {max_mAP:.4f}, max accuracy top1: {max_acc1:.4f}, max accuracy top5: {max_acc5:.4f}')
+                print(f'Max accuracy top1: {max_acc1:.4f}, max accuracy top5: {max_acc5:.4f}')
         else:
-            test_stats ={'mAP': 0.0}
+            if args.multilabel:
+                test_stats = {'mAP': 0.0}
+            else:
+                test_stats = {'acc1': 0.0, 'acc5': 0.0}
             print(f'too new to evaluate!')
 
         if log_writer is not None:

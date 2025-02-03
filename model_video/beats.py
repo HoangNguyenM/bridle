@@ -101,7 +101,7 @@ class BEATs3D(nn.Module):
 
     def forward_tokenizer_training(self, x):
         with torch.no_grad():
-            emb_enc = self.encoder_decoder(x, 0.0, encoder_training=False)
+            emb_enc = self.encoder_decoder(x, mask=None, encoder_training=False)
         estimator_emb, emb_loss = self.tokenizer.forward_estimator_embeddings(x)
 
         loss = self.tokenizer_training_loss(emb_enc, estimator_emb, emb_loss)

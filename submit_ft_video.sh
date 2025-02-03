@@ -40,6 +40,4 @@ python submitit_finetune.py \
     --epochs 75 \
     --warmup_epochs 5 \
     --distributed_wrapper True \
-    # --mask_t_prob $mask_t_prob \
-    # --mask_f_prob $mask_f_prob \
-    # --precision fp32 \
+    --criterion ce \

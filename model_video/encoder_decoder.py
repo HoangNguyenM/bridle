@@ -87,7 +87,10 @@ class PretrainVisionTransformerEncoder(nn.Module):
         x = x + self.pos_embed.type_as(x).to(x.device).clone().detach()
 
         B, _, C = x.shape
-        x_vis = x[~mask].reshape(B, -1, C) # ~mask means visible
+        if mask is None:
+            x_vis = x.reshape(B, -1, C)
+        else:
+            x_vis = x[~mask].reshape(B, -1, C) # ~mask means visible
 
         for blk in self.blocks:
             x_vis = blk(x_vis)
@@ -251,7 +254,7 @@ class PretrainVisionTransformer(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token', 'mask_token'}
 
-    def forward(self, x, mask):
+    def forward(self, x, mask=None):
         _, _, T, _, _ = x.shape
         x_vis = self.encoder(x, mask) # [B, N_vis, C_e]
         x_vis = self.encoder_to_decoder(x_vis) # [B, N_vis, C_d]
@@ -260,9 +263,14 @@ class PretrainVisionTransformer(nn.Module):
         # we don't unshuffle the correct visible token order, 
         # but shuffle the pos embedding accorddingly.
         expand_pos_embed = self.pos_embed.expand(B, -1, -1).type_as(x).to(x.device).clone().detach()
-        pos_emd_vis = expand_pos_embed[~mask].reshape(B, -1, C)
-        pos_emd_mask = expand_pos_embed[mask].reshape(B, -1, C)
-        x_full = torch.cat([x_vis + pos_emd_vis, self.mask_token + pos_emd_mask], dim=1) # [B, N, C_d]
+        if mask is None:
+            pos_emd_vis = expand_pos_embed.reshape(B, -1, C)
+            x_full = x_vis + pos_emd_vis
+        else:
+            pos_emd_vis = expand_pos_embed[~mask].reshape(B, -1, C)
+            pos_emd_mask = expand_pos_embed[mask].reshape(B, -1, C)
+            x_full = torch.cat([x_vis + pos_emd_vis, self.mask_token + pos_emd_mask], dim=1) # [B, N, C_d]
+            
         x = self.decoder(x_full, pos_emd_mask.shape[1]) # [B, N_mask, 3 * 16 * 16]
 
         return x
